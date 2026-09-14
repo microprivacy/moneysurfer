@@ -69,6 +69,7 @@ import {
 } from './crypto.ts'
 import { prove, snarkjsProof, solidityProof } from './prover.ts'
 import { assertChain, read, rpc } from './rpc.ts'
+import { batch, proposeSafeTx, type SafeCall, safeNonce } from './safe.ts'
 import { makeSigner, type Signer, type SignerOpts } from './signer.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
@@ -262,7 +263,49 @@ async function allow(net: RpcClient, signer: Signer, p: Pool, amount: bigint) {
   log(`approved: ${await approve(amount)}`)
 }
 
-async function deposit(key: string | undefined, amountArg: string | undefined, chainId: number, sig: SignerOpts) {
+/** A deposit by a Safe, proposed to its owners: one SafeTx, with any approval a token needs batched in. */
+async function proposeDeposit(
+  net: RpcClient,
+  p: Pool,
+  safe: string,
+  signer: Signer,
+  call: SafeCall,
+  amount: bigint,
+  index: bigint,
+) {
+  const calls: SafeCall[] = []
+  if (p.asset !== NATIVE) {
+    const allowance = await read(net, p.asset, ERC20.allowance, { owner: safe, spender: p.entrypoint })
+    const approve = (value: bigint): SafeCall => ({
+      to: p.asset,
+      value: 0n,
+      data: ERC20.approve.encodeInput({ spender: p.entrypoint, value }),
+    })
+    // As from a wallet: exactly the amount, reset first where USDT would refuse.
+    if (allowance < amount) calls.push(...(allowance > 0n ? [approve(0n)] : []), approve(amount))
+  }
+  calls.push(call)
+  log(`proposing it to Safe ${safe} as ${signer.address}${calls.length > 1 ? ', batched with the approval' : ''}`)
+  const { safeTxHash, queue } = await proposeSafeTx({
+    net,
+    chainId: p.chainId,
+    safe,
+    signer,
+    call: calls.length > 1 ? batch(calls) : call,
+  })
+  log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+  log(
+    `  it becomes account #${index + 1n} when executed. Until then another deposit into ${p.key} would take the same number, and whichever lands second reverts`,
+  )
+}
+
+async function deposit(
+  key: string | undefined,
+  amountArg: string | undefined,
+  chainId: number,
+  sig: SignerOpts,
+  safe?: string,
+) {
   if (!key || !amountArg) throw new UsageError('usage: moneysurfer deposit <pool> <amount>')
   const { net, p, scope, nextIndex } = await loadPool(chainId, key)
   const where = `${p.key} on ${chainName(chainId)}`
@@ -276,10 +319,14 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     throw new UsageError(`the minimum deposit is ${amountOf(p, cfg.minimumDepositAmount)}`)
   }
   const signer = await makeSigner(net, chainId, sig)
+  // With --safe the Safe deposits -- and is then the depositor, the one
+  // address that can ragequit. The signer only proposes.
+  if (safe) await safeNonce(net, chainId, safe)
+  const from = safe ?? signer.address
   const token = p.asset !== NATIVE
   if (token) {
-    const held = await read(net, p.asset, ERC20.balanceOf, signer.address)
-    if (held < amount) throw new UsageError(`${signer.address} holds only ${amountOf(p, held)}`)
+    const held = await read(net, p.asset, ERC20.balanceOf, from)
+    if (held < amount) throw new UsageError(`${from} holds only ${amountOf(p, held)}`)
   }
 
   // The next unused deposit index; one whose precommitment is already on the
@@ -291,15 +338,16 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     pre = precommitment(depositSecrets(k, scope, ++index))
 
   const fee = (amount * cfg.vettingFeeBPS) / 10_000n
-  log(`depositing ${amountOf(p, amount)} into ${where} from ${signer.address}`)
+  log(`depositing ${amountOf(p, amount)} into ${where} from ${from}`)
   log(
     `  the pool keeps ${amountOf(p, amount - fee)} after the ${Number(cfg.vettingFeeBPS) / 100}% vetting fee; account #${index + 1n}`,
   )
-  if (token) await allow(net, signer, p, amount)
   const data = token
     ? TOKEN_DEPOSIT.encodeInput({ _asset: p.asset, _value: amount, _precommitment: pre })
     : ENTRYPOINT.deposit.encodeInput(pre)
   const value = token ? 0n : amount
+  if (safe) return proposeDeposit(net, p, safe, signer, { to: p.entrypoint, value, data }, amount, index)
+  if (token) await allow(net, signer, p, amount)
   try {
     await net.estimateGas({ from: signer.address, to: p.entrypoint, value: `0x${value.toString(16)}`, data: hex(data) })
   } catch (e) {
@@ -325,6 +373,7 @@ type WithdrawOpts = SignerOpts & {
   id?: string
   relayer?: string
   self?: boolean
+  safe?: string
   maxFeePercent: number
   dryRun?: boolean
   threads: number
@@ -409,11 +458,16 @@ async function withdraw(
   o: WithdrawOpts,
 ) {
   if (!key || !amountArg || !to) throw new UsageError('usage: moneysurfer withdraw <pool> <amount|all> <recipient>')
-  if (o.relayer && o.self) throw new UsageError('--relayer and --self are exclusive')
+  if ([o.relayer, o.self, o.safe].filter(Boolean).length > 1) {
+    throw new UsageError('--relayer, --self and --safe are exclusive')
+  }
   const recipient = checksummed(to)
   const { net, p, scope, ev, accounts } = await loadPool(chainId, key)
   const amount = amountArg === 'all' ? 'all' : parseUnits(amountArg, p.decimals)
-  const signer = o.self && !o.dryRun ? await makeSigner(net, chainId, o) : undefined
+  // A --self or --safe signer, and the Safe, are resolved before syncing and
+  // proving, so a misconfiguration fails in a second rather than after all that.
+  const signer = (o.self || o.safe) && !o.dryRun ? await makeSigner(net, chainId, o) : undefined
+  if (o.safe) await safeNonce(net, chainId, o.safe)
   const asp = await aspSet(net, p, scope, log)
   const a = pickAccount(accounts, asp, amount, o.id)
   const value = amount === 'all' ? a.note.value : amount
@@ -423,16 +477,17 @@ async function withdraw(
   const cfg = await read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset)
 
   // Who is paid what. Through a relayer: its fee, quoted without telling it the
-  // recipient. Yourself (--self): no fee, and your signer pays the gas.
-  const quote = o.self
-    ? undefined
-    : await pickRelayer(
-        o.relayer ? [o.relayer] : entrypoint(chainId).relayers,
-        p,
-        value,
-        cfg.maxRelayFeeBPS,
-        o.maxFeePercent,
-      )
+  // recipient. Yourself (--self) or a Safe (--safe): no fee, and the sender pays the gas.
+  const quote =
+    o.self || o.safe
+      ? undefined
+      : await pickRelayer(
+          o.relayer ? [o.relayer] : entrypoint(chainId).relayers,
+          p,
+          value,
+          cfg.maxRelayFeeBPS,
+          o.maxFeePercent,
+        )
   const relayer = quote?.base
   const feeRecipient = quote?.feeRecipient ?? recipient
   const feeBPS = quote?.feeBPS ?? 0n
@@ -479,11 +534,31 @@ async function withdraw(
     _scope: scope,
   })
   // The whole relay, simulated: roots, context, nullifier, fee cap -- before anyone pays gas.
-  const sim = await net.dryRun({ from: signer?.address ?? feeRecipient, to: p.entrypoint, data: hex(calldata) })
+  const sim = await net.dryRun({
+    from: o.safe ?? signer?.address ?? feeRecipient,
+    to: p.entrypoint,
+    data: hex(calldata),
+  })
   if (!sim.success) throw new Error(`the withdrawal would revert: ${sim.reason}`)
   log('simulated: the Entrypoint accepts it')
   if (o.dryRun) {
     out(JSON.stringify({ entrypoint: p.entrypoint, recipient, fee: String(fee), calldata: hex(calldata) }, null, 2))
+    return
+  }
+  if (o.safe) {
+    log(`proposing to Safe ${o.safe} as ${signer!.address} -- the Safe, sending it, is linked to the withdrawal`)
+    const { safeTxHash, queue } = await proposeSafeTx({
+      net,
+      chainId,
+      safe: o.safe,
+      signer: signer!,
+      call: { to: p.entrypoint, value: 0n, data: calldata },
+    })
+    log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+    log(
+      "  execute it soon: the proof holds only while the ASP root it names is the Entrypoint's latest, and its state root\n" +
+        "  one of the pool's last 64. If either moves on first, the execution reverts, nothing lost -- propose again",
+    )
     return
   }
 
@@ -520,16 +595,23 @@ async function withdraw(
 // ---------------------------------------------------------------------------
 // ragequit
 // ---------------------------------------------------------------------------
-async function ragequit(key: string | undefined, chainId: number, o: SignerOpts & { id?: string; threads: number }) {
+async function ragequit(
+  key: string | undefined,
+  chainId: number,
+  o: SignerOpts & { id?: string; threads: number; safe?: string },
+) {
   if (!key || o.id === undefined) throw new UsageError('usage: moneysurfer ragequit <pool> --id N')
   const { net, p, accounts } = await loadPool(chainId, key)
   const a = accounts.find((x) => String(Number(x.index) + 1) === o.id!.replace(/^#/, ''))
   if (!a) throw new UsageError(`no account #${o.id} (see: moneysurfer balance)`)
   if (!spendable(a)) throw new UsageError(`account #${o.id} has nothing left`)
   const signer = await makeSigner(net, chainId, o)
-  const depositor = await read(net, p.address, POOL.depositors, a.label)
-  if (depositor.toLowerCase() !== signer.address.toLowerCase()) {
-    throw new UsageError(`only the depositing address ${depositor} can ragequit this account`)
+  if (o.safe) await safeNonce(net, chainId, o.safe)
+  const depositor = addr.addChecksum(await read(net, p.address, POOL.depositors, a.label))
+  if (depositor.toLowerCase() !== (o.safe ?? signer.address).toLowerCase()) {
+    throw new UsageError(
+      `only the depositing address ${depositor} can ragequit this account${o.safe ? '' : ` -- if that is a Safe, pass --safe ${depositor}`}`,
+    )
   }
   log(`proving on ${o.threads} threads ...`)
   const proof = await prove(
@@ -538,6 +620,19 @@ async function ragequit(key: string | undefined, chainId: number, o: SignerOpts 
     o.threads,
   )
   const data = POOL.ragequit.encodeInput(solidityProof(proof) as never)
+  if (o.safe) {
+    log(
+      `proposing to Safe ${o.safe} as ${signer.address}: ${amountOf(p, a.note.value)} back to the Safe -- this is public`,
+    )
+    const { safeTxHash, queue } = await proposeSafeTx({
+      net,
+      chainId,
+      safe: o.safe,
+      signer,
+      call: { to: p.address, value: 0n, data },
+    })
+    return log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+  }
   const sim = await net.dryRun({ from: signer.address, to: p.address, data: hex(data) })
   if (!sim.success) throw new Error(`the ragequit would revert: ${sim.reason}`)
   log(`ragequitting ${amountOf(p, a.note.value)} back to ${signer.address} -- this is public`)
@@ -564,9 +659,13 @@ const HELP = `moneysurfer -- Privacy Pools from the command line
   withdraw <pool> <amount|all> <to>  withdraw privately, through a relayer by default
        --id N                        from account #N (default: the first that can)
        --relayer URL | --self        a relayer of your choosing, or submit and pay gas yourself
+       --safe SAFE                   ... or have that Safe submit it (see below)
        --max-fee-percent N           refuse a relayer fee above N% (default 1)
        --dry-run                     prove and simulate, but send nothing
   ragequit <pool> --id N             take an account back publicly, to the depositing address
+
+  --safe SAFE                        deposit, withdraw, ragequit: propose it to that Safe's owners
+                                     instead of sending it -- signed by an owner, or a proposer they added
 
   --chain NAME                       ethereum (default), optimism, arbitrum
   --rpc-url URL                      your own RPC instead of the public default
@@ -575,7 +674,8 @@ const HELP = `moneysurfer -- Privacy Pools from the command line
 signing -- a local key, or else a wallet (Frame, or the one at --rpc-url):
   --private-key PK | URAGAN_PRIVATE_KEY, --account NAME, --keystore FILE, --from ADDR
 
-env: MONEYSURFER_HOME, MONEYSURFER_MNEMONIC, MONEYSURFER_ASSETS, MONEYSURFER_ENTRYPOINTS`
+env: MONEYSURFER_HOME, MONEYSURFER_MNEMONIC, MONEYSURFER_ASSETS, MONEYSURFER_ENTRYPOINTS,
+     MONEYSURFER_SAFE_TX_SERVICE`
 
 const OPTIONS = {
   chain: { type: 'string' },
@@ -586,6 +686,7 @@ const OPTIONS = {
   id: { type: 'string' },
   relayer: { type: 'string' },
   self: { type: 'boolean' },
+  safe: { type: 'string' },
   'max-fee-percent': { type: 'string' },
   'dry-run': { type: 'boolean' },
   'private-key': { type: 'string' },
@@ -604,6 +705,7 @@ try {
   if (!Number.isInteger(threads) || threads < 1) throw new UsageError('--threads must be a positive integer')
   const maxFeePercent = v['max-fee-percent'] === undefined ? 1 : Number(v['max-fee-percent'])
   if (!(maxFeePercent >= 0 && maxFeePercent <= 10)) throw new UsageError('--max-fee-percent must be from 0 to 10')
+  const safe = v.safe === undefined ? undefined : checksummed(v.safe)
   const sig: SignerOpts = {
     privateKey: v['private-key'],
     account: v.account,
@@ -616,18 +718,19 @@ try {
     pools: () => poolsCmd(chain),
     balance: () => balance(chain),
     sync: () => syncCmd(chain),
-    deposit: () => deposit(rest[0], rest[1], chain ?? 1, sig),
+    deposit: () => deposit(rest[0], rest[1], chain ?? 1, sig, safe),
     withdraw: () =>
       withdraw(rest[0], rest[1], rest[2], chain ?? 1, {
         ...sig,
         id: v.id,
         relayer: v.relayer,
         self: v.self,
+        safe,
         maxFeePercent,
         dryRun: v['dry-run'],
         threads,
       }),
-    ragequit: () => ragequit(rest[0], chain ?? 1, { ...sig, id: v.id, threads }),
+    ragequit: () => ragequit(rest[0], chain ?? 1, { ...sig, id: v.id, threads, safe }),
     help: () => out(HELP),
   }
   const name = v.help ? 'help' : cmd

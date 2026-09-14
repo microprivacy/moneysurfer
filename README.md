@@ -13,7 +13,8 @@ Lightweight CLI for [Privacy Pools](https://privacypools.com).
 - Withdraw through a relayer (its fee is quoted without telling it the recipient), yourself, or
   take an unapproved deposit back with ragequit
 - Local Groth16 prover in pure JS (~7 s); every withdrawal is simulated before it is sent
-- Sign with Frame, a private key or a keystore
+- Sign with Frame, a private key or a keystore, or propose to a Safe's owners (`--safe`): a deposit
+  (a token's approval batched in), a withdrawal the Safe submits, or a ragequit of what it deposited
 - No build step
 
 ## Install
@@ -40,6 +41,11 @@ moneysurfer withdraw usdc 50 0xRecipient --chain optimism
 A token deposit is two transactions: an approval for exactly the amount, then the deposit.
 Relayers price some tokens far above their gas cost (Fast Relay has quoted USDS and sUSDS at 10–56%);
 `--max-fee-percent` (1% by default) refuses those, and `--self` withdraws without one.
+
+With `--safe SAFE` the transaction goes to the Safe Transaction Service for the owners to confirm and
+execute instead of being sent. A deposit made by a Safe can only be ragequit by it. A withdrawal must
+be executed while the ASP root its proof names is still the latest; Ethereum's ASP publishes a new
+one every hour or two, so propose there when the owners can act soon.
 
 A deposit can be withdrawn privately once the ASP approves it, which takes up to 7 days; ETH that
 came out of Tornado Cash is held until you complete a proof of association. Until then — or if it is
