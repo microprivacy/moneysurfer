@@ -37,6 +37,7 @@ import {
   pools,
   stateTree,
   syncPool,
+  syncPools,
   TOKEN_DEPOSIT,
 } from './chain.ts'
 import {
@@ -213,10 +214,16 @@ async function balance(chain?: number) {
   let found = 0
   for (const chainId of chainsOf(chain)) {
     const net = await connect(chainId)
-    for (const listed of await pools(net, chainId)) {
-      const { p, scope, accounts } = await load(net, listed)
+    const ps = await pools(net, chainId)
+    const [evs, scopes] = await Promise.all([
+      syncPools(net, ps),
+      Promise.all(ps.map((p) => read(net, p.address, POOL.SCOPE))),
+    ])
+    const k = masterKeys(mnemonic())
+    for (const [i, p] of ps.entries()) {
+      const { accounts } = recover(k, scopes[i]!, evs[i]!)
       if (!accounts.length) continue
-      const asp = await aspSet(net, p, scope, log)
+      const asp = await aspSet(net, p, scopes[i]!, log)
       out(`${chainName(chainId)} ${p.key}`)
       out(`  ${'#'.padEnd(4)} ${'DEPOSITED'.padStart(22)} ${'BALANCE'.padStart(22)}  ${'STATUS'.padEnd(17)} LABEL`)
       for (const a of accounts) {
@@ -233,7 +240,7 @@ async function balance(chain?: number) {
 async function syncCmd(chain?: number) {
   for (const chainId of chainsOf(chain)) {
     const net = await connect(chainId)
-    for (const p of await pools(net, chainId)) await syncPool(net, p, log)
+    await syncPools(net, await pools(net, chainId), log)
   }
 }
 

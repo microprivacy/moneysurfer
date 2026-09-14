@@ -259,7 +259,14 @@ const TOPIC = {
 // ---------------------------------------------------------------------------
 // Logs
 // ---------------------------------------------------------------------------
-type Log = { topics: string[]; data: string; blockNumber: string; transactionHash: string; logIndex: string }
+type Log = {
+  address: string
+  topics: string[]
+  data: string
+  blockNumber: string
+  transactionHash: string
+  logIndex: string
+}
 const hexNum = (n: number) => `0x${n.toString(16)}`
 
 /**
@@ -268,7 +275,7 @@ const hexNum = (n: number) => `0x${n.toString(16)}`
  */
 async function getLogs(
   net: RpcClient,
-  address: string,
+  address: string | string[],
   topics: (string | string[] | null)[] | undefined,
   from: number,
   to: number,
@@ -451,66 +458,93 @@ function saveEvents(p: Pool, ev: PoolEvents) {
   )
 }
 
-/** Bring a pool's event cache up to the chain head and return it. */
-export async function syncPool(net: RpcClient, p: Pool, log?: (s: string) => void): Promise<PoolEvents> {
-  const ev = loadEvents(p)
+/**
+ * Bring the event caches of pools on one chain up to its head, in a single
+ * eth_getLogs pass over all of them, and return them in the same order.
+ */
+export async function syncPools(net: RpcClient, ps: Pool[], log?: (s: string) => void): Promise<PoolEvents[]> {
+  if (!ps.length) return []
   const head = Number(await net.call('eth_blockNumber'))
-  const from = Math.max(p.deployedBlock, ev.block - REORG_BLOCKS + 1)
-  const keep = <T extends At>(xs: T[]) => xs.filter((x) => x.block < from)
-  ev.deposits = keep(ev.deposits)
-  ev.withdrawals = keep(ev.withdrawals)
-  ev.ragequits = keep(ev.ragequits)
-  // LeafInserted carries no block, so leaves are re-derived from what remains
-  // below `from` plus what is read now: inserts are strictly ordered by index.
-  const leavesBelow = ev.deposits.length + ev.withdrawals.length
-  ev.leaves = ev.leaves.slice(0, leavesBelow)
-
-  const label = `${p.key} on ${chainName(p.chainId)}`
-  const logs = await getLogs(net, p.address, undefined, from, head, (b) =>
-    process.stderr.write(`\r  syncing ${label}: block ${b} / ${head}   `),
+  const synced = ps.map((p) => {
+    const ev = loadEvents(p)
+    const from = Math.max(p.deployedBlock, ev.block - REORG_BLOCKS + 1)
+    const keep = <T extends At>(xs: T[]) => xs.filter((x) => x.block < from)
+    ev.deposits = keep(ev.deposits)
+    ev.withdrawals = keep(ev.withdrawals)
+    ev.ragequits = keep(ev.ragequits)
+    // The cache keeps leaves without their blocks, so they are re-derived from
+    // what remains below `from` plus what is read now: inserts are strictly
+    // ordered by index, one per deposit or withdrawal.
+    ev.leaves = ev.leaves.slice(0, ev.deposits.length + ev.withdrawals.length)
+    return { p, ev, from }
+  })
+  const byAddress = new Map(synced.map((s) => [s.p.address.toLowerCase(), s]))
+  const from = Math.min(...synced.map((s) => s.from))
+  // Progress only for a long catch-up, only on a terminal, and erased after.
+  const shown = process.stderr.isTTY && head - from > LOG_CHUNK
+  const what =
+    ps.length === 1 ? `${ps[0]!.key} on ${chainName(ps[0]!.chainId)}` : `${chainName(ps[0]!.chainId)}'s pools`
+  const logs = await getLogs(
+    net,
+    [...byAddress.keys()],
+    undefined,
+    from,
+    head,
+    shown ? (b) => process.stderr.write(`\r\x1b[K  syncing ${what}: block ${b} / ${head}`) : undefined,
   )
-  if (logs.length || head > from) process.stderr.write('\n')
+  if (shown) process.stderr.write('\r\x1b[K')
   for (const l of logs) {
-    const at = { block: Number(l.blockNumber), tx: l.transactionHash }
-    const [topic] = l.topics
-    if (topic === TOPIC.Deposited) {
-      const e = POOL_EVENTS.Deposited.decode(l.topics, l.data)
-      ev.deposits.push({
-        ...at,
-        depositor: e._depositor,
-        commitment: e._commitment,
-        label: e._label,
-        value: e._value,
-        precommitment: e._precommitmentHash,
-      })
-    } else if (topic === TOPIC.Withdrawn) {
-      const e = POOL_EVENTS.Withdrawn.decode(l.topics, l.data)
-      ev.withdrawals.push({
-        ...at,
-        processooor: e._processooor,
-        value: e._value,
-        spentNullifier: e._spentNullifier,
-        newCommitment: e._newCommitment,
-      })
-    } else if (topic === TOPIC.Ragequit) {
-      const e = POOL_EVENTS.Ragequit.decode(l.topics, l.data)
-      ev.ragequits.push({
-        ...at,
-        ragequitter: e._ragequitter,
-        commitment: e._commitment,
-        label: e._label,
-        value: e._value,
-      })
-    } else if (topic === TOPIC.LeafInserted) {
-      const e = POOL_EVENTS.LeafInserted.decode(l.topics, l.data)
-      ev.leaves.push([e._index, e._leaf])
-    }
+    const s = byAddress.get(l.address.toLowerCase())
+    if (s && Number(l.blockNumber) >= s.from) addEvent(s.ev, l)
   }
-  ev.leaves.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  ev.block = head
-  saveEvents(p, ev)
-  log?.(`${label}: ${ev.deposits.length} deposits, ${ev.withdrawals.length} withdrawals, ${ev.leaves.length} leaves`)
-  return ev
+  for (const { p, ev } of synced) {
+    ev.leaves.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    ev.block = head
+    saveEvents(p, ev)
+    log?.(
+      `${p.key} on ${chainName(p.chainId)}: ${ev.deposits.length} deposits, ${ev.withdrawals.length} withdrawals, ${ev.leaves.length} leaves`,
+    )
+  }
+  return synced.map((s) => s.ev)
+}
+
+export const syncPool = async (net: RpcClient, p: Pool): Promise<PoolEvents> => (await syncPools(net, [p]))[0]!
+
+function addEvent(ev: PoolEvents, l: Log) {
+  const at = { block: Number(l.blockNumber), tx: l.transactionHash }
+  const [topic] = l.topics
+  if (topic === TOPIC.Deposited) {
+    const e = POOL_EVENTS.Deposited.decode(l.topics, l.data)
+    ev.deposits.push({
+      ...at,
+      depositor: e._depositor,
+      commitment: e._commitment,
+      label: e._label,
+      value: e._value,
+      precommitment: e._precommitmentHash,
+    })
+  } else if (topic === TOPIC.Withdrawn) {
+    const e = POOL_EVENTS.Withdrawn.decode(l.topics, l.data)
+    ev.withdrawals.push({
+      ...at,
+      processooor: e._processooor,
+      value: e._value,
+      spentNullifier: e._spentNullifier,
+      newCommitment: e._newCommitment,
+    })
+  } else if (topic === TOPIC.Ragequit) {
+    const e = POOL_EVENTS.Ragequit.decode(l.topics, l.data)
+    ev.ragequits.push({
+      ...at,
+      ragequitter: e._ragequitter,
+      commitment: e._commitment,
+      label: e._label,
+      value: e._value,
+    })
+  } else if (topic === TOPIC.LeafInserted) {
+    const e = POOL_EVENTS.LeafInserted.decode(l.topics, l.data)
+    ev.leaves.push([e._index, e._leaf])
+  }
 }
 
 /** The pool's state tree, rebuilt from its inserts and checked against the root the pool holds now. */
