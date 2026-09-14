@@ -546,7 +546,7 @@ async function withdraw(
     return
   }
   if (o.safe) {
-    log(`proposing to Safe ${o.safe} as ${signer!.address} -- the Safe, sending it, is linked to the withdrawal`)
+    log(`proposing to Safe ${o.safe} as ${signer!.address}`)
     const { safeTxHash, queue } = await proposeSafeTx({
       net,
       chainId,
