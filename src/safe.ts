@@ -86,6 +86,38 @@ export async function safeNonce(net: RpcClient, chainId: number, safe: string): 
   }
 }
 
+/** The Safe's on-chain nonce, and the proposals waiting in its queue from there on. */
+export type SafeQueue = { nonce: bigint; queued: { nonce: bigint; data: string }[] }
+
+/** What the Safe Transaction Service holds for the Safe, not yet executed. */
+export async function safeQueue(net: RpcClient, chainId: number, safe: string): Promise<SafeQueue> {
+  const nonce = await safeNonce(net, chainId, safe)
+  const queued: SafeQueue['queued'] = []
+  let url: string | null =
+    `${SAFE_TX_SERVICE}/${safePrefix(chainId)}/api/v1/safes/${safe}/multisig-transactions/?executed=false&nonce__gte=${nonce}&limit=100`
+  while (url) {
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+    if (!res.ok) throw new Error(`the Safe Transaction Service would not list the Safe's queue (HTTP ${res.status})`)
+    const page = (await res.json()) as {
+      next: string | null
+      results: { nonce: string | number; data: string | null }[]
+    }
+    for (const r of page.results) queued.push({ nonce: BigInt(r.nonce), data: (r.data ?? '0x').toLowerCase() })
+    url = page.next
+  }
+  return { nonce, queued }
+}
+
+/** The queued proposal whose calldata carries `value` as a 32-byte word: a precommitment, a nullifier hash. */
+export const queuedWith = (q: SafeQueue, value: bigint) =>
+  q.queued.find((t) => t.data.includes(value.toString(16).padStart(64, '0')))
+
+/**
+ * The nonce for a new proposal: after everything queued. One at a nonce a
+ * queued proposal holds could only ever replace it.
+ */
+export const nextNonce = (q: SafeQueue) => q.queued.reduce((n, t) => (t.nonce >= n ? t.nonce + 1n : n), q.nonce)
+
 /** A call for the Safe to make; operation 1 (delegatecall) only for a batch(). */
 export type SafeCall = { to: string; value: bigint; data: Uint8Array; operation?: 0 | 1 }
 
@@ -120,14 +152,18 @@ async function simulate(net: RpcClient, safe: string, call: SafeCall) {
   }
 }
 
-/** The SafeTx for a call at the Safe's current nonce, simulated, and its hash as the Safe itself computes it. */
+/**
+ * The SafeTx for a call at `nonce`, simulated, and its hash as the Safe
+ * itself computes it. The simulation runs on today's state, not on what the
+ * proposals queued before it would leave.
+ */
 export async function prepareSafeTx(
   net: RpcClient,
   chainId: number,
   safe: string,
   call: SafeCall,
+  nonce: bigint,
 ): Promise<{ typed: TypedData; safeTxHash: string }> {
-  const nonce = await safeNonce(net, chainId, safe)
   await simulate(net, safe, call)
   const operation = call.operation ?? 0
   const hash = await read(net, safe, SAFE.getTransactionHash, {
@@ -173,9 +209,10 @@ export async function proposeSafeTx(o: {
   safe: string
   signer: Signer
   call: SafeCall
+  nonce: bigint
 }): Promise<{ safeTxHash: string; queue: string }> {
   const prefix = safePrefix(o.chainId)
-  const { typed, safeTxHash } = await prepareSafeTx(o.net, o.chainId, o.safe, o.call)
+  const { typed, safeTxHash } = await prepareSafeTx(o.net, o.chainId, o.safe, o.call, o.nonce)
   let signature = await o.signer.signTyped(typed)
   if (!/^0x[0-9a-fA-F]{130}$/.test(signature))
     throw new Error(`the signer returned a malformed signature: ${signature}`)

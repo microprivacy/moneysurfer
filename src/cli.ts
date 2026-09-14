@@ -69,7 +69,7 @@ import {
 } from './crypto.ts'
 import { prove, snarkjsProof, solidityProof } from './prover.ts'
 import { assertChain, read, rpc } from './rpc.ts'
-import { batch, proposeSafeTx, type SafeCall, safeNonce } from './safe.ts'
+import { batch, nextNonce, proposeSafeTx, queuedWith, type SafeCall, type SafeQueue, safeQueue } from './safe.ts'
 import { makeSigner, type Signer, type SignerOpts } from './signer.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
@@ -263,11 +263,24 @@ async function allow(net: RpcClient, signer: Signer, p: Pool, amount: bigint) {
   log(`approved: ${await approve(amount)}`)
 }
 
+/**
+ * Where a proposal spending account `a` goes in the Safe's queue: at the
+ * nonce of one that spends it already -- both cannot execute, and queued
+ * behind it this one could only revert -- else after everything queued.
+ */
+function spendNonce(q: SafeQueue, a: Account): bigint {
+  const same = queuedWith(q, nullifierHash(a.note.secrets))
+  if (!same) return nextNonce(q)
+  log(`account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; this one takes its place`)
+  return same.nonce
+}
+
 /** A deposit by a Safe, proposed to its owners: one SafeTx, with any approval a token needs batched in. */
 async function proposeDeposit(
   net: RpcClient,
   p: Pool,
   safe: string,
+  queue: SafeQueue,
   signer: Signer,
   call: SafeCall,
   amount: bigint,
@@ -286,16 +299,18 @@ async function proposeDeposit(
   }
   calls.push(call)
   log(`proposing it to Safe ${safe} as ${signer.address}${calls.length > 1 ? ', batched with the approval' : ''}`)
-  const { safeTxHash, queue } = await proposeSafeTx({
+  const nonce = nextNonce(queue)
+  const proposed = await proposeSafeTx({
     net,
     chainId: p.chainId,
     safe,
     signer,
     call: calls.length > 1 ? batch(calls) : call,
+    nonce,
   })
-  log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+  log(`proposed ${proposed.safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${proposed.queue}`)
   log(
-    `  it becomes account #${index + 1n} when executed. Until then another deposit into ${p.key} would take the same number, and whichever lands second reverts`,
+    `  it becomes account #${index + 1n} when executed. Until then a deposit into ${p.key} made outside this Safe would take the same number, and whichever lands second reverts`,
   )
 }
 
@@ -321,7 +336,7 @@ async function deposit(
   const signer = await makeSigner(net, chainId, sig)
   // With --safe the Safe deposits -- and is then the depositor, the one
   // address that can ragequit. The signer only proposes.
-  if (safe) await safeNonce(net, chainId, safe)
+  const queue = safe ? await safeQueue(net, chainId, safe) : undefined
   const from = safe ?? signer.address
   const token = p.asset !== NATIVE
   if (token) {
@@ -329,13 +344,16 @@ async function deposit(
     if (held < amount) throw new UsageError(`${from} holds only ${amountOf(p, held)}`)
   }
 
-  // The next unused deposit index; one whose precommitment is already on the
-  // Entrypoint (a deposit still pending, say) is skipped.
+  // The next unused deposit index; one whose precommitment is on the
+  // Entrypoint already (a deposit still pending, say), or in a proposal in
+  // the Safe's queue, is skipped.
   const k = masterKeys(mnemonic())
   let index = nextIndex
   let pre = precommitment(depositSecrets(k, scope, index))
-  while (await read(net, p.entrypoint, ENTRYPOINT.usedPrecommitments, pre))
-    pre = precommitment(depositSecrets(k, scope, ++index))
+  const taken = async (pre: bigint) =>
+    (queue !== undefined && queuedWith(queue, pre) !== undefined) ||
+    (await read(net, p.entrypoint, ENTRYPOINT.usedPrecommitments, pre))
+  while (await taken(pre)) pre = precommitment(depositSecrets(k, scope, ++index))
 
   const fee = (amount * cfg.vettingFeeBPS) / 10_000n
   log(`depositing ${amountOf(p, amount)} into ${where} from ${from}`)
@@ -346,7 +364,8 @@ async function deposit(
     ? TOKEN_DEPOSIT.encodeInput({ _asset: p.asset, _value: amount, _precommitment: pre })
     : ENTRYPOINT.deposit.encodeInput(pre)
   const value = token ? 0n : amount
-  if (safe) return proposeDeposit(net, p, safe, signer, { to: p.entrypoint, value, data }, amount, index)
+  if (safe && queue)
+    return proposeDeposit(net, p, safe, queue, signer, { to: p.entrypoint, value, data }, amount, index)
   if (token) await allow(net, signer, p, amount)
   try {
     await net.estimateGas({ from: signer.address, to: p.entrypoint, value: `0x${value.toString(16)}`, data: hex(data) })
@@ -467,9 +486,10 @@ async function withdraw(
   // A --self or --safe signer, and the Safe, are resolved before syncing and
   // proving, so a misconfiguration fails in a second rather than after all that.
   const signer = (o.self || o.safe) && !o.dryRun ? await makeSigner(net, chainId, o) : undefined
-  if (o.safe) await safeNonce(net, chainId, o.safe)
+  const queue = o.safe ? await safeQueue(net, chainId, o.safe) : undefined
   const asp = await aspSet(net, p, scope, log)
   const a = pickAccount(accounts, asp, amount, o.id)
+  const nonce = queue && spendNonce(queue, a)
   const value = amount === 'all' ? a.note.value : amount
   if (value <= 0n || value > a.note.value) {
     throw new UsageError(`account #${a.index + 1n} holds ${amountOf(p, a.note.value)}`)
@@ -545,16 +565,17 @@ async function withdraw(
     out(JSON.stringify({ entrypoint: p.entrypoint, recipient, fee: String(fee), calldata: hex(calldata) }, null, 2))
     return
   }
-  if (o.safe) {
+  if (o.safe && nonce !== undefined) {
     log(`proposing to Safe ${o.safe} as ${signer!.address}`)
-    const { safeTxHash, queue } = await proposeSafeTx({
+    const proposed = await proposeSafeTx({
       net,
       chainId,
       safe: o.safe,
       signer: signer!,
       call: { to: p.entrypoint, value: 0n, data: calldata },
+      nonce,
     })
-    log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+    log(`proposed ${proposed.safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${proposed.queue}`)
     log(
       "  execute it soon: the proof holds only while the ASP root it names is the Entrypoint's latest, and its state root\n" +
         "  one of the pool's last 64. If either moves on first, the execution reverts, nothing lost -- propose again",
@@ -606,7 +627,7 @@ async function ragequit(
   if (!a) throw new UsageError(`no account #${o.id} (see: moneysurfer balance)`)
   if (!spendable(a)) throw new UsageError(`account #${o.id} has nothing left`)
   const signer = await makeSigner(net, chainId, o)
-  if (o.safe) await safeNonce(net, chainId, o.safe)
+  const queue = o.safe ? await safeQueue(net, chainId, o.safe) : undefined
   const depositor = addr.addChecksum(await read(net, p.address, POOL.depositors, a.label))
   if (depositor.toLowerCase() !== (o.safe ?? signer.address).toLowerCase()) {
     throw new UsageError(
@@ -620,18 +641,22 @@ async function ragequit(
     o.threads,
   )
   const data = POOL.ragequit.encodeInput(solidityProof(proof) as never)
-  if (o.safe) {
+  if (o.safe && queue) {
     log(
       `proposing to Safe ${o.safe} as ${signer.address}: ${amountOf(p, a.note.value)} back to the Safe -- this is public`,
     )
-    const { safeTxHash, queue } = await proposeSafeTx({
+    const nonce = spendNonce(queue, a)
+    const proposed = await proposeSafeTx({
       net,
       chainId,
       safe: o.safe,
       signer,
       call: { to: p.address, value: 0n, data },
+      nonce,
     })
-    return log(`proposed ${safeTxHash}; the owners confirm and execute it at ${queue}`)
+    return log(
+      `proposed ${proposed.safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${proposed.queue}`,
+    )
   }
   const sim = await net.dryRun({ from: signer.address, to: p.address, data: hex(data) })
   if (!sim.success) throw new Error(`the ragequit would revert: ${sim.reason}`)
