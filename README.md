@@ -44,4 +44,4 @@ Run `moneysurfer help` for all commands and options.
 
 ## License
 
-MIT
+MPL-2.0
