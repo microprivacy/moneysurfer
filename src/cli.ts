@@ -1,0 +1,559 @@
+#!/usr/bin/env node
+/**
+ * moneysurfer -- a Privacy Pools client.
+ *
+ * TypeScript run directly by Node. Chain access and signing via
+ * micro-eth-signer; Poseidon, BIP-32/39 and hashing via noble and scure;
+ * witnesses from the circuits' own wasm and Groth16 proofs via
+ * micro-zk-proofs. One mnemonic derives every note, so there is nothing else
+ * to back up.
+ */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
+import { dirname, join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { parseArgs } from 'node:util'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex } from '@noble/hashes/utils.js'
+import { generateMnemonic } from '@scure/bip39'
+import { wordlist } from '@scure/bip39/wordlists/english.js'
+import { addr } from 'micro-eth-signer'
+import type { RpcClient } from 'micro-eth-signer/net.js'
+import { formatUnits, parseUnits } from 'micro-eth-signer/utils.js'
+import { type Account, recover, spendable } from './account.ts'
+import { type AspSet, aspSet, ENTRYPOINT, POOL, type PoolEvents, stateTree, syncPool } from './chain.ts'
+import {
+  ARTIFACT_URL,
+  ARTIFACTS,
+  ASSETS,
+  chainName,
+  HOME,
+  NATIVE,
+  type Pool,
+  parseChain,
+  pool,
+  pools,
+  registryChains,
+  relayersFor,
+  rpcUrl,
+  setRpcUrl,
+  UsageError,
+} from './config.ts'
+import {
+  depositSecrets,
+  isMnemonic,
+  masterKeys,
+  mnemonicFromSignature,
+  nullifierHash,
+  precommitment,
+  relayData,
+  seedTypedData,
+  withdrawalContext,
+  withdrawalSecrets,
+} from './crypto.ts'
+import { prove, snarkjsProof, solidityProof } from './prover.ts'
+import { assertChain, read, rpc } from './rpc.ts'
+import { makeSigner, type SignerOpts } from './signer.ts'
+
+const log = (s: string) => process.stderr.write(`${s}\n`)
+const out = (s: string) => process.stdout.write(`${s}\n`)
+process.stdout.on('error', (e: NodeJS.ErrnoException) => {
+  if (e.code === 'EPIPE') process.exit(0)
+  throw e
+})
+const hex = (b: Uint8Array) => `0x${bytesToHex(b)}`
+const shortLabel = (label: bigint) => `0x${label.toString(16).padStart(64, '0').slice(0, 8)}`
+const amountOf = (p: Pool, v: bigint) => `${formatUnits(v, p.decimals)} ${p.symbol}`
+
+function checksummed(a: string): string {
+  if (!addr.isValid(a)) {
+    const hexOnly = /^0x[0-9a-fA-F]{40}$/.test(a)
+    throw new UsageError(hexOnly ? `${a} fails its EIP-55 checksum -- probably a typo` : `not an address: ${a}`)
+  }
+  return addr.addChecksum(a)
+}
+
+async function connect(chainId: number): Promise<RpcClient> {
+  const net = rpc(rpcUrl(chainId))
+  await assertChain(net, chainId)
+  return net
+}
+
+// ---------------------------------------------------------------------------
+// The mnemonic
+// ---------------------------------------------------------------------------
+const MNEMONIC_FILE = join(HOME, 'mnemonic')
+
+function mnemonic(): string {
+  const m =
+    process.env.MONEYSURFER_MNEMONIC ?? (existsSync(MNEMONIC_FILE) ? readFileSync(MNEMONIC_FILE, 'utf8') : undefined)
+  if (!m) throw new UsageError('no mnemonic -- run `moneysurfer init` first, or set MONEYSURFER_MNEMONIC')
+  if (!isMnemonic(m)) throw new UsageError('the mnemonic is not a valid BIP-39 phrase')
+  return m.trim()
+}
+
+function saveMnemonic(words: string) {
+  mkdirSync(dirname(MNEMONIC_FILE), { recursive: true, mode: 0o700 })
+  writeFileSync(MNEMONIC_FILE, `${words}\n`, { mode: 0o600, flag: 'wx' })
+  log(`mnemonic saved to ${MNEMONIC_FILE} -- back it up. It is the only key to every deposit you make.`)
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY)
+    throw new UsageError('pipe the mnemonic on stdin, e.g. `moneysurfer init --import < words.txt`')
+  let s = ''
+  for await (const chunk of process.stdin) s += chunk
+  return s.trim().split(/\s+/).join(' ')
+}
+
+async function init(o: { import?: boolean; fromWallet?: boolean; chain?: number; sig: SignerOpts }) {
+  if (existsSync(MNEMONIC_FILE)) throw new UsageError(`${MNEMONIC_FILE} exists already -- refusing to replace it`)
+  if (o.import) {
+    const words = await readStdin()
+    if (!isMnemonic(words)) throw new UsageError('that is not a valid BIP-39 mnemonic')
+    return saveMnemonic(words)
+  }
+  if (o.fromWallet) {
+    // privacypools.com's "sign in with wallet": the seed is derived from a
+    // signature, which must therefore be deterministic -- so ask for two.
+    const chainId = o.chain ?? 1
+    const signer = await makeSigner(await connect(chainId), chainId, o.sig)
+    log(`asking ${signer.address} to sign the Privacy Pools seed message, twice ...`)
+    const typed = seedTypedData(signer.address)
+    const [a, b] = [await signer.signTyped(typed), await signer.signTyped(typed)]
+    if (a !== b) throw new Error('the wallet signed the same message differently twice; it cannot derive a stable seed')
+    saveMnemonic(mnemonicFromSignature(a, signer.address))
+    return log(`this is the account privacypools.com derives for ${signer.address}`)
+  }
+  const words = generateMnemonic(wordlist, 256)
+  saveMnemonic(words)
+  out(words)
+}
+
+// ---------------------------------------------------------------------------
+// setup
+// ---------------------------------------------------------------------------
+async function setup() {
+  mkdirSync(ASSETS, { recursive: true })
+  for (const [name, want] of Object.entries(ARTIFACTS)) {
+    const file = join(ASSETS, name)
+    if (existsSync(file) && bytesToHex(sha256(readFileSync(file))) === want) {
+      log(`have ${name}`)
+      continue
+    }
+    log(`downloading ${name} ...`)
+    const res = await fetch(`${ARTIFACT_URL}/${name}`)
+    if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`)
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    const got = bytesToHex(sha256(bytes))
+    if (got !== want) throw new Error(`${name}: sha256 ${got} does not match the pinned ${want} -- refusing it`)
+    writeFileSync(file, bytes)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// pools / balance
+// ---------------------------------------------------------------------------
+const chainsOf = (chain?: number) => (chain === undefined ? registryChains() : [chain])
+
+async function poolsCmd(chain?: number) {
+  out(
+    `${'CHAIN'.padEnd(10)} ${'POOL'.padEnd(6)} ${'ADDRESS'.padEnd(42)} ${'MINIMUM'.padStart(14)} ${'FEE'.padStart(6)} ${'NOTES'.padStart(7)}`,
+  )
+  for (const chainId of chainsOf(chain)) {
+    const net = await connect(chainId)
+    for (const p of pools(chainId)) {
+      const [cfg, size] = await Promise.all([
+        read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset),
+        read(net, p.address, POOL.currentTreeSize),
+      ])
+      out(
+        `${chainName(chainId).padEnd(10)} ${p.key.padEnd(6)} ${p.address.padEnd(42)} ${amountOf(p, cfg.minimumDepositAmount).padStart(14)} ${`${Number(cfg.vettingFeeBPS) / 100}%`.padStart(6)} ${String(size).padStart(7)}`,
+      )
+    }
+  }
+}
+
+type Loaded = { net: RpcClient; p: Pool; scope: bigint; ev: PoolEvents; accounts: Account[]; nextIndex: bigint }
+
+async function loadPool(chainId: number, key: string): Promise<Loaded> {
+  const net = await connect(chainId)
+  const p = pool(chainId, key)
+  const [scope, ev] = await Promise.all([read(net, p.address, POOL.SCOPE), syncPool(net, p)])
+  const { accounts, nextIndex } = recover(masterKeys(mnemonic()), scope, ev)
+  return { net, p, scope, ev, accounts, nextIndex }
+}
+
+const statusOf = (a: Account, asp: AspSet) =>
+  a.ragequit ? 'ragequit' : a.note.value === 0n ? 'empty' : asp.labels.has(a.label) ? 'approved' : 'not approved yet'
+
+async function balance(chain?: number) {
+  let found = 0
+  for (const chainId of chainsOf(chain)) {
+    for (const { key } of pools(chainId)) {
+      const { net, p, scope, accounts } = await loadPool(chainId, key)
+      if (!accounts.length) continue
+      const asp = await aspSet(net, p, scope, log)
+      out(`${chainName(chainId)} ${p.key}`)
+      out(`  ${'#'.padEnd(4)} ${'DEPOSITED'.padStart(22)} ${'BALANCE'.padStart(22)}  ${'STATUS'.padEnd(17)} LABEL`)
+      for (const a of accounts) {
+        found++
+        out(
+          `  ${String(Number(a.index) + 1).padEnd(4)} ${amountOf(p, a.deposit.value).padStart(22)} ${amountOf(p, a.note.value).padStart(22)}  ${statusOf(a, asp).padEnd(17)} ${shortLabel(a.label)}`,
+        )
+      }
+    }
+  }
+  if (!found) log('no deposits found for this mnemonic')
+}
+
+async function syncCmd(chain?: number) {
+  for (const chainId of chainsOf(chain)) {
+    const net = await connect(chainId)
+    for (const p of pools(chainId)) await syncPool(net, p, log)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// deposit
+// ---------------------------------------------------------------------------
+async function deposit(key: string | undefined, amountArg: string | undefined, chainId: number, sig: SignerOpts) {
+  if (!key || !amountArg) throw new UsageError('usage: moneysurfer deposit <pool> <amount>')
+  const { net, p, scope, nextIndex } = await loadPool(chainId, key)
+  if (p.asset !== NATIVE) throw new UsageError(`${p.key}: only native-coin pools are supported so far`)
+  if (await read(net, p.address, POOL.dead)) throw new UsageError(`${p.key} on ${chainName(chainId)} is wound down`)
+  const amount = parseUnits(amountArg, p.decimals)
+  const cfg = await read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset)
+  if (amount < cfg.minimumDepositAmount) {
+    throw new UsageError(`the minimum deposit is ${amountOf(p, cfg.minimumDepositAmount)}`)
+  }
+  const signer = await makeSigner(net, chainId, sig)
+
+  // The next unused deposit index; one whose precommitment is already on the
+  // Entrypoint (a deposit still pending, say) is skipped.
+  const k = masterKeys(mnemonic())
+  let index = nextIndex
+  let pre = precommitment(depositSecrets(k, scope, index))
+  while (await read(net, p.entrypoint, ENTRYPOINT.usedPrecommitments, pre))
+    pre = precommitment(depositSecrets(k, scope, ++index))
+
+  const fee = (amount * cfg.vettingFeeBPS) / 10_000n
+  const data = ENTRYPOINT.deposit.encodeInput(pre)
+  try {
+    await net.estimateGas({
+      from: signer.address,
+      to: p.entrypoint,
+      value: `0x${amount.toString(16)}`,
+      data: hex(data),
+    })
+  } catch (e) {
+    throw new UsageError(`the deposit would fail, nothing was sent: ${(e as Error).message}`)
+  }
+  log(`depositing ${amountOf(p, amount)} into ${p.key} on ${chainName(chainId)} from ${signer.address}`)
+  log(
+    `  the pool keeps ${amountOf(p, amount - fee)} after the ${Number(cfg.vettingFeeBPS) / 100}% vetting fee; account #${index + 1n}`,
+  )
+  let tx: string
+  try {
+    tx = await signer.send({ to: p.entrypoint, value: amount, data })
+  } catch (e) {
+    throw new Error(
+      `deposit failed or unconfirmed: ${(e as Error).message}\n  check with \`moneysurfer balance --chain ${chainName(chainId).toLowerCase()}\` before trying again`,
+    )
+  }
+  log(`deposited: ${tx}`)
+  const d = (await syncPool(net, p)).deposits.find((x) => x.precommitment === pre)
+  if (d) log(`label ${shortLabel(d.label)}: the ASP reviews it before it can be withdrawn privately (up to 7 days)`)
+}
+
+// ---------------------------------------------------------------------------
+// withdraw
+// ---------------------------------------------------------------------------
+type WithdrawOpts = SignerOpts & {
+  id?: string
+  relayer?: string
+  self?: boolean
+  maxFeePercent: number
+  dryRun?: boolean
+  threads: number
+}
+
+function pickAccount(accounts: Account[], asp: AspSet, amount: bigint | 'all', id?: string): Account {
+  if (id !== undefined) {
+    const a = accounts.find((x) => String(Number(x.index) + 1) === id.replace(/^#/, ''))
+    if (!a) throw new UsageError(`no account #${id} (see: moneysurfer balance)`)
+    if (!spendable(a)) throw new UsageError(`account #${id} has nothing left to withdraw`)
+    if (!asp.labels.has(a.label))
+      throw new UsageError(`account #${id} is not approved by the ASP (yet) -- wait, or ragequit`)
+    return a
+  }
+  const a = accounts.find(
+    (x) => spendable(x) && asp.labels.has(x.label) && (amount === 'all' || x.note.value >= amount),
+  )
+  if (!a) throw new UsageError('no approved account holds that much (see: moneysurfer balance)')
+  return a
+}
+
+const postJson = async (url: string, body: unknown) => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  })
+  const text = await res.text()
+  let json: Record<string, unknown> = {}
+  try {
+    json = JSON.parse(text)
+  } catch {
+    // reported below
+  }
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status} ${String(json.message ?? json.error ?? text).slice(0, 300)}`)
+  return json
+}
+
+async function withdraw(
+  key: string | undefined,
+  amountArg: string | undefined,
+  to: string | undefined,
+  chainId: number,
+  o: WithdrawOpts,
+) {
+  if (!key || !amountArg || !to) throw new UsageError('usage: moneysurfer withdraw <pool> <amount|all> <recipient>')
+  if (o.relayer && o.self) throw new UsageError('--relayer and --self are exclusive')
+  const recipient = checksummed(to)
+  const { net, p, scope, ev, accounts } = await loadPool(chainId, key)
+  const amount = amountArg === 'all' ? 'all' : parseUnits(amountArg, p.decimals)
+  const signer = o.self && !o.dryRun ? await makeSigner(net, chainId, o) : undefined
+  const asp = await aspSet(net, p, scope, log)
+  const a = pickAccount(accounts, asp, amount, o.id)
+  const value = amount === 'all' ? a.note.value : amount
+  if (value <= 0n || value > a.note.value) {
+    throw new UsageError(`account #${a.index + 1n} holds ${amountOf(p, a.note.value)}`)
+  }
+  const cfg = await read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset)
+
+  // Who is paid what. Through a relayer: its fee, quoted without telling it the
+  // recipient. Yourself (--self): no fee, and your signer pays the gas.
+  let feeRecipient = recipient
+  let feeBPS = 0n
+  const relayer = o.self ? undefined : (o.relayer ?? relayersFor(chainId)[0])
+  if (relayer) {
+    const base = relayer.replace(/\/$/, '')
+    const details = (await (
+      await fetch(`${base}/details?chainId=${chainId}&assetAddress=${p.asset}`, { signal: AbortSignal.timeout(30_000) })
+    ).json()) as { feeReceiverAddress?: string }
+    if (!details.feeReceiverAddress) throw new UsageError(`${base} does not serve ${p.key} on ${chainName(chainId)}`)
+    feeRecipient = checksummed(details.feeReceiverAddress)
+    const quote = await postJson(`${base}/quote`, { chainId, amount: String(value), asset: p.asset })
+    feeBPS = BigInt(String(quote.feeBPS))
+    if (feeBPS > cfg.maxRelayFeeBPS) throw new UsageError(`${base} asks ${feeBPS} bps, above the pool's cap`)
+    if (feeBPS > BigInt(Math.round(o.maxFeePercent * 100))) {
+      throw new UsageError(`${base} asks ${Number(feeBPS) / 100}%, above --max-fee-percent ${o.maxFeePercent}`)
+    }
+    log(`relayer ${base}: fee ${Number(feeBPS) / 100}% to ${feeRecipient}`)
+  }
+  const fee = (value * feeBPS) / 10_000n
+  log(`withdrawing ${amountOf(p, value)} from account #${a.index + 1n}: ${amountOf(p, value - fee)} to ${recipient}`)
+
+  // The proof: the note is in the pool's state tree, its label in the ASP's set.
+  const state = await stateTree(net, p, ev)
+  const leaf = state.levels[0]!.indexOf(a.note.commitment)
+  const labelAt = asp.tree.levels[0]!.indexOf(a.label)
+  if (leaf < 0) throw new Error('the note is missing from the synced state tree')
+  const sp = state.proof(leaf)
+  const ap = asp.tree.proof(labelAt)
+  const pad = (xs: bigint[]) => [...xs, ...Array<bigint>(32 - xs.length).fill(0n)]
+  const data = relayData(recipient, feeRecipient, feeBPS)
+  const next = withdrawalSecrets(masterKeys(mnemonic()), a.label, BigInt(a.withdrawals.length))
+  log(`proving on ${o.threads} threads ...`)
+  const proof = await prove(
+    'withdraw',
+    {
+      withdrawnValue: value,
+      stateRoot: state.root,
+      stateTreeDepth: 32n,
+      ASPRoot: asp.root,
+      ASPTreeDepth: 32n,
+      context: withdrawalContext(p.entrypoint, data, scope),
+      label: a.label,
+      existingValue: a.note.value,
+      existingNullifier: a.note.secrets.nullifier,
+      existingSecret: a.note.secrets.secret,
+      newNullifier: next.nullifier,
+      newSecret: next.secret,
+      stateSiblings: pad(sp.siblings),
+      stateIndex: BigInt(sp.index),
+      ASPSiblings: pad(ap.siblings),
+      ASPIndex: BigInt(ap.index),
+    },
+    o.threads,
+  )
+  const calldata = ENTRYPOINT.relay.encodeInput({
+    _withdrawal: { processooor: p.entrypoint, data },
+    _proof: solidityProof(proof) as never,
+    _scope: scope,
+  })
+  // The whole relay, simulated: roots, context, nullifier, fee cap -- before anyone pays gas.
+  const sim = await net.dryRun({ from: signer?.address ?? feeRecipient, to: p.entrypoint, data: hex(calldata) })
+  if (!sim.success) throw new Error(`the withdrawal would revert: ${sim.reason}`)
+  log('simulated: the Entrypoint accepts it')
+  if (o.dryRun) {
+    out(JSON.stringify({ entrypoint: p.entrypoint, recipient, fee: String(fee), calldata: hex(calldata) }, null, 2))
+    return
+  }
+
+  const spent = nullifierHash(a.note.secrets)
+  if (relayer) {
+    const reply = await postJson(`${relayer.replace(/\/$/, '')}/request`, {
+      withdrawal: { processooor: p.entrypoint, data: hex(data) },
+      publicSignals: proof.publicSignals.map(String),
+      proof: snarkjsProof(proof),
+      scope: String(scope),
+      chainId,
+    })
+    log(`relayer accepted${reply.txHash ? `: ${reply.txHash}` : ''} -- waiting for the chain`)
+  } else {
+    log(`submitting from ${signer!.address} -- this links that address to the withdrawal`)
+    try {
+      log(`sent: ${await signer!.send({ to: p.entrypoint, data: calldata })}`)
+    } catch (e) {
+      throw new Error(
+        `withdrawal failed or unconfirmed: ${(e as Error).message}\n  check with \`moneysurfer balance\` before trying again`,
+      )
+    }
+  }
+  // The chain, not the relayer, says when it is done.
+  for (const deadline = Date.now() + 15 * 60_000; Date.now() < deadline; await sleep(4000)) {
+    if (await read(net, p.address, POOL.nullifierHashes, spent)) {
+      const w = (await syncPool(net, p)).withdrawals.find((x) => x.spentNullifier === spent)
+      return log(`withdrawn${w ? `: ${w.tx}` : ''}`)
+    }
+  }
+  throw new Error('not confirmed within 15 minutes -- check `moneysurfer balance` before trying again')
+}
+
+// ---------------------------------------------------------------------------
+// ragequit
+// ---------------------------------------------------------------------------
+async function ragequit(key: string | undefined, chainId: number, o: SignerOpts & { id?: string; threads: number }) {
+  if (!key || o.id === undefined) throw new UsageError('usage: moneysurfer ragequit <pool> --id N')
+  const { net, p, accounts } = await loadPool(chainId, key)
+  const a = accounts.find((x) => String(Number(x.index) + 1) === o.id!.replace(/^#/, ''))
+  if (!a) throw new UsageError(`no account #${o.id} (see: moneysurfer balance)`)
+  if (!spendable(a)) throw new UsageError(`account #${o.id} has nothing left`)
+  const signer = await makeSigner(net, chainId, o)
+  const depositor = await read(net, p.address, POOL.depositors, a.label)
+  if (depositor.toLowerCase() !== signer.address.toLowerCase()) {
+    throw new UsageError(`only the depositing address ${depositor} can ragequit this account`)
+  }
+  log(`proving on ${o.threads} threads ...`)
+  const proof = await prove(
+    'commitment',
+    { value: a.note.value, label: a.label, nullifier: a.note.secrets.nullifier, secret: a.note.secrets.secret },
+    o.threads,
+  )
+  const data = POOL.ragequit.encodeInput(solidityProof(proof) as never)
+  const sim = await net.dryRun({ from: signer.address, to: p.address, data: hex(data) })
+  if (!sim.success) throw new Error(`the ragequit would revert: ${sim.reason}`)
+  log(`ragequitting ${amountOf(p, a.note.value)} back to ${signer.address} -- this is public`)
+  try {
+    log(`ragequit: ${await signer.send({ to: p.address, data })}`)
+  } catch (e) {
+    throw new Error(
+      `ragequit failed or unconfirmed: ${(e as Error).message}\n  check with \`moneysurfer balance\` before trying again`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
+const HELP = `moneysurfer -- Privacy Pools from the command line
+
+  setup                              fetch the circuits, check their pinned sha256
+  init                               make a new mnemonic (the one secret behind every note)
+       --import                      ... or take one on stdin
+       --from-wallet                 ... or derive privacypools.com's from your wallet's signature
+  pools                              the pools, their minimum deposit, fee and size
+  balance                            your accounts and what each holds
+  sync                               pull every pool's events into the cache
+  deposit <pool> <amount>            deposit from your wallet
+  withdraw <pool> <amount|all> <to>  withdraw privately, through a relayer by default
+       --id N                        from account #N (default: the first that can)
+       --relayer URL | --self        a relayer of your choosing, or submit and pay gas yourself
+       --max-fee-percent N           refuse a relayer fee above N% (default 1)
+       --dry-run                     prove and simulate, but send nothing
+  ragequit <pool> --id N             take an account back publicly, to the depositing address
+
+  --chain NAME                       ethereum (default), optimism, arbitrum
+  --rpc-url URL                      your own RPC instead of the public default
+  --threads N                        prover threads (default: all cores)
+
+signing -- a local key, or else a wallet (Frame, or the one at --rpc-url):
+  --private-key PK | URAGAN_PRIVATE_KEY, --account NAME, --keystore FILE, --from ADDR
+
+env: MONEYSURFER_HOME, MONEYSURFER_MNEMONIC, MONEYSURFER_ASSETS, MONEYSURFER_POOLS`
+
+const OPTIONS = {
+  chain: { type: 'string' },
+  'rpc-url': { type: 'string' },
+  threads: { type: 'string' },
+  import: { type: 'boolean' },
+  'from-wallet': { type: 'boolean' },
+  id: { type: 'string' },
+  relayer: { type: 'string' },
+  self: { type: 'boolean' },
+  'max-fee-percent': { type: 'string' },
+  'dry-run': { type: 'boolean' },
+  'private-key': { type: 'string' },
+  account: { type: 'string' },
+  keystore: { type: 'string' },
+  from: { type: 'string' },
+  help: { type: 'boolean', short: 'h' },
+} as const
+
+try {
+  const { values: v, positionals } = parseArgs({ allowPositionals: true, options: OPTIONS })
+  const [cmd = 'help', ...rest] = positionals
+  setRpcUrl(v['rpc-url'])
+  const chain = v.chain === undefined ? undefined : parseChain(v.chain)
+  const threads = v.threads === undefined ? availableParallelism() : Number(v.threads)
+  if (!Number.isInteger(threads) || threads < 1) throw new UsageError('--threads must be a positive integer')
+  const maxFeePercent = v['max-fee-percent'] === undefined ? 1 : Number(v['max-fee-percent'])
+  if (!(maxFeePercent >= 0 && maxFeePercent <= 10)) throw new UsageError('--max-fee-percent must be from 0 to 10')
+  const sig: SignerOpts = {
+    privateKey: v['private-key'],
+    account: v.account,
+    keystore: v.keystore,
+    from: v.from === undefined ? undefined : checksummed(v.from),
+  }
+  const commands: Record<string, () => unknown> = {
+    setup: () => setup(),
+    init: () => init({ import: v.import, fromWallet: v['from-wallet'], chain, sig }),
+    pools: () => poolsCmd(chain),
+    balance: () => balance(chain),
+    sync: () => syncCmd(chain),
+    deposit: () => deposit(rest[0], rest[1], chain ?? 1, sig),
+    withdraw: () =>
+      withdraw(rest[0], rest[1], rest[2], chain ?? 1, {
+        ...sig,
+        id: v.id,
+        relayer: v.relayer,
+        self: v.self,
+        maxFeePercent,
+        dryRun: v['dry-run'],
+        threads,
+      }),
+    ragequit: () => ragequit(rest[0], chain ?? 1, { ...sig, id: v.id, threads }),
+    help: () => out(HELP),
+  }
+  const name = v.help ? 'help' : cmd
+  if (!Object.hasOwn(commands, name)) throw new UsageError(`unknown command '${name}'\n\n${HELP}`)
+  await commands[name]!()
+} catch (e) {
+  // Node's own errors carry string codes; JSON-RPC errors carry numbers (4001: rejected in the wallet).
+  const code = (e as { code?: unknown }).code
+  const usage = e instanceof UsageError || (typeof code === 'string' && code.startsWith('ERR_PARSE_ARGS'))
+  log(`error: ${(e as Error).message}`)
+  if (process.env.DEBUG) log((e as Error).stack ?? '')
+  process.exit(usage ? 2 : 1)
+}

@@ -1,0 +1,5 @@
+# Circuit artifacts, fetched and sha256-checked by `setup`
+assets/
+
+# npm
+node_modules/
