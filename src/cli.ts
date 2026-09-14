@@ -26,20 +26,30 @@ import { addr } from 'micro-eth-signer'
 import type { RpcClient } from 'micro-eth-signer/net.js'
 import { formatUnits, parseUnits } from 'micro-eth-signer/utils.js'
 import { type Account, recover, spendable } from './account.ts'
-import { type AspSet, aspSet, ENTRYPOINT, POOL, type PoolEvents, stateTree, syncPool } from './chain.ts'
+import {
+  type AspSet,
+  aspSet,
+  ENTRYPOINT,
+  ERC20,
+  POOL,
+  type PoolEvents,
+  pool,
+  pools,
+  stateTree,
+  syncPool,
+  TOKEN_DEPOSIT,
+} from './chain.ts'
 import {
   ARTIFACT_URL,
   ARTIFACTS,
   ASSETS,
   chainName,
+  entrypoint,
   HOME,
   NATIVE,
   type Pool,
   parseChain,
-  pool,
-  pools,
   registryChains,
-  relayersFor,
   rpcUrl,
   setRpcUrl,
   UsageError,
@@ -58,7 +68,7 @@ import {
 } from './crypto.ts'
 import { prove, snarkjsProof, solidityProof } from './prover.ts'
 import { assertChain, read, rpc } from './rpc.ts'
-import { makeSigner, type SignerOpts } from './signer.ts'
+import { makeSigner, type Signer, type SignerOpts } from './signer.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
 const out = (s: string) => process.stdout.write(`${s}\n`)
@@ -163,17 +173,21 @@ const chainsOf = (chain?: number) => (chain === undefined ? registryChains() : [
 
 async function poolsCmd(chain?: number) {
   out(
-    `${'CHAIN'.padEnd(10)} ${'POOL'.padEnd(6)} ${'ADDRESS'.padEnd(42)} ${'MINIMUM'.padStart(14)} ${'FEE'.padStart(6)} ${'NOTES'.padStart(7)}`,
+    `${'CHAIN'.padEnd(10)} ${'POOL'.padEnd(8)} ${'ADDRESS'.padEnd(42)} ${'MINIMUM'.padStart(16)} ${'FEE'.padStart(6)} ${'NOTES'.padStart(7)}`,
   )
   for (const chainId of chainsOf(chain)) {
     const net = await connect(chainId)
-    for (const p of pools(chainId)) {
-      const [cfg, size] = await Promise.all([
+    for (const p of await pools(net, chainId)) {
+      const [cfg, size, dead] = await Promise.all([
         read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset),
         read(net, p.address, POOL.currentTreeSize),
+        read(net, p.address, POOL.dead),
       ])
+      const open = !p.removed && !dead
+      const minimum = open ? amountOf(p, cfg.minimumDepositAmount) : '-'
+      const fee = open ? `${Number(cfg.vettingFeeBPS) / 100}%` : '-'
       out(
-        `${chainName(chainId).padEnd(10)} ${p.key.padEnd(6)} ${p.address.padEnd(42)} ${amountOf(p, cfg.minimumDepositAmount).padStart(14)} ${`${Number(cfg.vettingFeeBPS) / 100}%`.padStart(6)} ${String(size).padStart(7)}`,
+        `${chainName(chainId).padEnd(10)} ${p.key.padEnd(8)} ${p.address.padEnd(42)} ${minimum.padStart(16)} ${fee.padStart(6)} ${String(size).padStart(7)}${p.removed ? '  removed' : dead ? '  wound down' : ''}`,
       )
     }
   }
@@ -181,12 +195,15 @@ async function poolsCmd(chain?: number) {
 
 type Loaded = { net: RpcClient; p: Pool; scope: bigint; ev: PoolEvents; accounts: Account[]; nextIndex: bigint }
 
-async function loadPool(chainId: number, key: string): Promise<Loaded> {
-  const net = await connect(chainId)
-  const p = pool(chainId, key)
+async function load(net: RpcClient, p: Pool): Promise<Loaded> {
   const [scope, ev] = await Promise.all([read(net, p.address, POOL.SCOPE), syncPool(net, p)])
   const { accounts, nextIndex } = recover(masterKeys(mnemonic()), scope, ev)
   return { net, p, scope, ev, accounts, nextIndex }
+}
+
+async function loadPool(chainId: number, key: string): Promise<Loaded> {
+  const net = await connect(chainId)
+  return load(net, await pool(net, chainId, key))
 }
 
 const statusOf = (a: Account, asp: AspSet) =>
@@ -195,8 +212,9 @@ const statusOf = (a: Account, asp: AspSet) =>
 async function balance(chain?: number) {
   let found = 0
   for (const chainId of chainsOf(chain)) {
-    for (const { key } of pools(chainId)) {
-      const { net, p, scope, accounts } = await loadPool(chainId, key)
+    const net = await connect(chainId)
+    for (const listed of await pools(net, chainId)) {
+      const { p, scope, accounts } = await load(net, listed)
       if (!accounts.length) continue
       const asp = await aspSet(net, p, scope, log)
       out(`${chainName(chainId)} ${p.key}`)
@@ -215,24 +233,47 @@ async function balance(chain?: number) {
 async function syncCmd(chain?: number) {
   for (const chainId of chainsOf(chain)) {
     const net = await connect(chainId)
-    for (const p of pools(chainId)) await syncPool(net, p, log)
+    for (const p of await pools(net, chainId)) await syncPool(net, p, log)
   }
 }
 
 // ---------------------------------------------------------------------------
 // deposit
 // ---------------------------------------------------------------------------
+/**
+ * Let the Entrypoint take `amount` of the pool's token, which its deposit
+ * pulls. Exactly that much, so nothing stays approved once it has.
+ */
+async function allow(net: RpcClient, signer: Signer, p: Pool, amount: bigint) {
+  const allowance = await read(net, p.asset, ERC20.allowance, { owner: signer.address, spender: p.entrypoint })
+  if (allowance >= amount) return
+  const approve = (value: bigint) =>
+    signer.send({ to: p.asset, data: ERC20.approve.encodeInput({ spender: p.entrypoint, value }) })
+  // USDT, for one, refuses to change an allowance from one nonzero value to another.
+  if (allowance > 0n) log(`reset the old allowance: ${await approve(0n)}`)
+  log(`approving the Entrypoint to take ${amountOf(p, amount)} -- a transaction of its own, before the deposit`)
+  log(`approved: ${await approve(amount)}`)
+}
+
 async function deposit(key: string | undefined, amountArg: string | undefined, chainId: number, sig: SignerOpts) {
   if (!key || !amountArg) throw new UsageError('usage: moneysurfer deposit <pool> <amount>')
   const { net, p, scope, nextIndex } = await loadPool(chainId, key)
-  if (p.asset !== NATIVE) throw new UsageError(`${p.key}: only native-coin pools are supported so far`)
-  if (await read(net, p.address, POOL.dead)) throw new UsageError(`${p.key} on ${chainName(chainId)} is wound down`)
-  const amount = parseUnits(amountArg, p.decimals)
+  const where = `${p.key} on ${chainName(chainId)}`
   const cfg = await read(net, p.entrypoint, ENTRYPOINT.assetConfig, p.asset)
+  if (p.removed || cfg.pool.toLowerCase() !== p.address.toLowerCase()) {
+    throw new UsageError(`${where} was taken off the Entrypoint and takes no deposits`)
+  }
+  if (await read(net, p.address, POOL.dead)) throw new UsageError(`${where} is wound down`)
+  const amount = parseUnits(amountArg, p.decimals)
   if (amount < cfg.minimumDepositAmount) {
     throw new UsageError(`the minimum deposit is ${amountOf(p, cfg.minimumDepositAmount)}`)
   }
   const signer = await makeSigner(net, chainId, sig)
+  const token = p.asset !== NATIVE
+  if (token) {
+    const held = await read(net, p.asset, ERC20.balanceOf, signer.address)
+    if (held < amount) throw new UsageError(`${signer.address} holds only ${amountOf(p, held)}`)
+  }
 
   // The next unused deposit index; one whose precommitment is already on the
   // Entrypoint (a deposit still pending, say) is skipped.
@@ -243,24 +284,23 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     pre = precommitment(depositSecrets(k, scope, ++index))
 
   const fee = (amount * cfg.vettingFeeBPS) / 10_000n
-  const data = ENTRYPOINT.deposit.encodeInput(pre)
-  try {
-    await net.estimateGas({
-      from: signer.address,
-      to: p.entrypoint,
-      value: `0x${amount.toString(16)}`,
-      data: hex(data),
-    })
-  } catch (e) {
-    throw new UsageError(`the deposit would fail, nothing was sent: ${(e as Error).message}`)
-  }
-  log(`depositing ${amountOf(p, amount)} into ${p.key} on ${chainName(chainId)} from ${signer.address}`)
+  log(`depositing ${amountOf(p, amount)} into ${where} from ${signer.address}`)
   log(
     `  the pool keeps ${amountOf(p, amount - fee)} after the ${Number(cfg.vettingFeeBPS) / 100}% vetting fee; account #${index + 1n}`,
   )
+  if (token) await allow(net, signer, p, amount)
+  const data = token
+    ? TOKEN_DEPOSIT.encodeInput({ _asset: p.asset, _value: amount, _precommitment: pre })
+    : ENTRYPOINT.deposit.encodeInput(pre)
+  const value = token ? 0n : amount
+  try {
+    await net.estimateGas({ from: signer.address, to: p.entrypoint, value: `0x${value.toString(16)}`, data: hex(data) })
+  } catch (e) {
+    throw new UsageError(`the deposit would fail, nothing was deposited: ${(e as Error).message}`)
+  }
   let tx: string
   try {
-    tx = await signer.send({ to: p.entrypoint, value: amount, data })
+    tx = await signer.send({ to: p.entrypoint, value, data })
   } catch (e) {
     throw new Error(
       `deposit failed or unconfirmed: ${(e as Error).message}\n  check with \`moneysurfer balance --chain ${chainName(chainId).toLowerCase()}\` before trying again`,
@@ -297,6 +337,43 @@ function pickAccount(accounts: Account[], asp: AspSet, amount: bigint | 'all', i
   )
   if (!a) throw new UsageError('no approved account holds that much (see: moneysurfer balance)')
   return a
+}
+
+type Quote = { base: string; feeRecipient: string; feeBPS: bigint }
+
+/**
+ * The first relayer that serves the pool's asset and quotes `value` --
+ * without being told the recipient -- within both the pool's cap and
+ * --max-fee-percent.
+ */
+async function pickRelayer(urls: string[], p: Pool, value: bigint, capBPS: bigint, maxPercent: number): Promise<Quote> {
+  const refused: string[] = []
+  for (const url of urls) {
+    const base = url.replace(/\/$/, '')
+    try {
+      const details = (await (
+        await fetch(`${base}/details?chainId=${p.chainId}&assetAddress=${p.asset}`, {
+          signal: AbortSignal.timeout(30_000),
+        })
+      ).json()) as { feeReceiverAddress?: string }
+      if (!details.feeReceiverAddress) {
+        refused.push(`${base}: does not serve ${p.symbol}`)
+        continue
+      }
+      const quote = await postJson(`${base}/quote`, { chainId: p.chainId, amount: String(value), asset: p.asset })
+      const feeBPS = BigInt(String(quote.feeBPS))
+      const asks = `asks ${Number(feeBPS) / 100}%`
+      if (feeBPS > capBPS) refused.push(`${base}: ${asks}, above the pool's ${Number(capBPS) / 100}% cap`)
+      else if (feeBPS > BigInt(Math.round(maxPercent * 100))) {
+        refused.push(`${base}: ${asks}, above --max-fee-percent ${maxPercent}`)
+      } else return { base, feeRecipient: checksummed(details.feeReceiverAddress), feeBPS }
+    } catch (e) {
+      refused.push(`${base}: ${(e as Error).message.replace(`${base}/`, '')}`)
+    }
+  }
+  throw new UsageError(
+    `no relayer takes this withdrawal:\n  ${refused.join('\n  ')}\n  raise --max-fee-percent, name one with --relayer, or pay the gas with --self`,
+  )
 }
 
 const postJson = async (url: string, body: unknown) => {
@@ -340,24 +417,19 @@ async function withdraw(
 
   // Who is paid what. Through a relayer: its fee, quoted without telling it the
   // recipient. Yourself (--self): no fee, and your signer pays the gas.
-  let feeRecipient = recipient
-  let feeBPS = 0n
-  const relayer = o.self ? undefined : (o.relayer ?? relayersFor(chainId)[0])
-  if (relayer) {
-    const base = relayer.replace(/\/$/, '')
-    const details = (await (
-      await fetch(`${base}/details?chainId=${chainId}&assetAddress=${p.asset}`, { signal: AbortSignal.timeout(30_000) })
-    ).json()) as { feeReceiverAddress?: string }
-    if (!details.feeReceiverAddress) throw new UsageError(`${base} does not serve ${p.key} on ${chainName(chainId)}`)
-    feeRecipient = checksummed(details.feeReceiverAddress)
-    const quote = await postJson(`${base}/quote`, { chainId, amount: String(value), asset: p.asset })
-    feeBPS = BigInt(String(quote.feeBPS))
-    if (feeBPS > cfg.maxRelayFeeBPS) throw new UsageError(`${base} asks ${feeBPS} bps, above the pool's cap`)
-    if (feeBPS > BigInt(Math.round(o.maxFeePercent * 100))) {
-      throw new UsageError(`${base} asks ${Number(feeBPS) / 100}%, above --max-fee-percent ${o.maxFeePercent}`)
-    }
-    log(`relayer ${base}: fee ${Number(feeBPS) / 100}% to ${feeRecipient}`)
-  }
+  const quote = o.self
+    ? undefined
+    : await pickRelayer(
+        o.relayer ? [o.relayer] : entrypoint(chainId).relayers,
+        p,
+        value,
+        cfg.maxRelayFeeBPS,
+        o.maxFeePercent,
+      )
+  const relayer = quote?.base
+  const feeRecipient = quote?.feeRecipient ?? recipient
+  const feeBPS = quote?.feeBPS ?? 0n
+  if (quote) log(`relayer ${quote.base}: fee ${Number(feeBPS) / 100}% to ${feeRecipient}`)
   const fee = (value * feeBPS) / 10_000n
   log(`withdrawing ${amountOf(p, value)} from account #${a.index + 1n}: ${amountOf(p, value - fee)} to ${recipient}`)
 
@@ -410,7 +482,7 @@ async function withdraw(
 
   const spent = nullifierHash(a.note.secrets)
   if (relayer) {
-    const reply = await postJson(`${relayer.replace(/\/$/, '')}/request`, {
+    const reply = await postJson(`${relayer}/request`, {
       withdrawal: { processooor: p.entrypoint, data: hex(data) },
       publicSignals: proof.publicSignals.map(String),
       proof: snarkjsProof(proof),
@@ -478,10 +550,10 @@ const HELP = `moneysurfer -- Privacy Pools from the command line
   init                               make a new mnemonic (the one secret behind every note)
        --import                      ... or take one on stdin
        --from-wallet                 ... or derive privacypools.com's from your wallet's signature
-  pools                              the pools, their minimum deposit, fee and size
+  pools                              every pool the Entrypoints registered: minimum deposit, fee, size
   balance                            your accounts and what each holds
   sync                               pull every pool's events into the cache
-  deposit <pool> <amount>            deposit from your wallet
+  deposit <pool> <amount>            deposit from your wallet (a token is approved first, exactly)
   withdraw <pool> <amount|all> <to>  withdraw privately, through a relayer by default
        --id N                        from account #N (default: the first that can)
        --relayer URL | --self        a relayer of your choosing, or submit and pay gas yourself
@@ -496,7 +568,7 @@ const HELP = `moneysurfer -- Privacy Pools from the command line
 signing -- a local key, or else a wallet (Frame, or the one at --rpc-url):
   --private-key PK | URAGAN_PRIVATE_KEY, --account NAME, --keystore FILE, --from ADDR
 
-env: MONEYSURFER_HOME, MONEYSURFER_MNEMONIC, MONEYSURFER_ASSETS, MONEYSURFER_POOLS`
+env: MONEYSURFER_HOME, MONEYSURFER_MNEMONIC, MONEYSURFER_ASSETS, MONEYSURFER_ENTRYPOINTS`
 
 const OPTIONS = {
   chain: { type: 'string' },

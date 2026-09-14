@@ -4,9 +4,9 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * Everything Privacy Pools keeps on-chain: the Entrypoint and pool
- * contracts, a cache of each pool's events synced from its deployment, the
- * state tree those events build, and the ASP's association set -- fetched
+ * Everything Privacy Pools keeps on-chain: the Entrypoint and the pools it
+ * has registered, a cache of each pool's events synced from its registration,
+ * the state tree those events build, and the ASP's association set -- fetched
  * from the IPFS copy the ASP pins with every root, and trusted only once it
  * hashes to the root the Entrypoint holds.
  */
@@ -14,9 +14,21 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
+import { addr } from 'micro-eth-signer'
 import { createContract, events } from 'micro-eth-signer/abi.js'
 import type { RpcClient } from 'micro-eth-signer/net.js'
-import { ASP_API, chainName, HOME, IPFS_GATEWAYS, LOG_CHUNK, type Pool } from './config.ts'
+import {
+  ASP_API,
+  chainName,
+  type Entrypoint,
+  entrypoint,
+  HOME,
+  IPFS_GATEWAYS,
+  LOG_CHUNK,
+  NATIVE,
+  type Pool,
+  UsageError,
+} from './config.ts'
 import { LeanIMT } from './crypto.ts'
 import { RangeLimitError, read } from './rpc.ts'
 
@@ -89,7 +101,65 @@ export const ENTRYPOINT_ABI = [
       { name: '_timestamp', type: 'uint256', indexed: false },
     ],
   },
+  {
+    type: 'event',
+    name: 'PoolRegistered',
+    inputs: [
+      { name: '_pool', type: 'address', indexed: false },
+      { name: '_asset', type: 'address', indexed: false },
+      { name: '_scope', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'PoolRemoved',
+    inputs: [
+      { name: '_pool', type: 'address', indexed: false },
+      { name: '_asset', type: 'address', indexed: false },
+      { name: '_scope', type: 'uint256', indexed: false },
+    ],
+  },
 ] as const
+
+/** Entrypoint.deposit's ERC-20 overload, kept apart so each `deposit` keeps its plain name. */
+export const TOKEN_DEPOSIT = createContract([
+  {
+    type: 'function',
+    name: 'deposit',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: '_asset', type: 'address' }, u256('_value'), u256('_precommitment')],
+    outputs: [u256('_commitment')],
+  },
+] as const).deposit
+
+export const ERC20 = createContract([
+  { type: 'function', name: 'symbol', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'string' }] },
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] },
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [u256('')],
+  },
+  {
+    type: 'function',
+    name: 'allowance',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+    ],
+    outputs: [u256('')],
+  },
+  {
+    type: 'function',
+    name: 'approve',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'spender', type: 'address' }, u256('value')],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+] as const)
 
 export const POOL_ABI = [
   { type: 'function', name: 'SCOPE', stateMutability: 'view', inputs: [], outputs: [u256('')] },
@@ -173,7 +243,7 @@ export const POOL_ABI = [
 export const ENTRYPOINT = createContract(ENTRYPOINT_ABI)
 export const POOL = createContract(POOL_ABI)
 const POOL_EVENTS = events(POOL_ABI)
-const ROOT_UPDATED = events(ENTRYPOINT_ABI).RootUpdated
+const ENTRYPOINT_EVENTS = events(ENTRYPOINT_ABI)
 
 const topicOf = (signature: string) => `0x${bytesToHex(keccak_256(utf8ToBytes(signature)))}`
 const TOPIC = {
@@ -182,6 +252,8 @@ const TOPIC = {
   Ragequit: topicOf('Ragequit(address,uint256,uint256,uint256)'),
   LeafInserted: topicOf('LeafInserted(uint256,uint256,uint256)'),
   RootUpdated: topicOf('RootUpdated(uint256,string,uint256)'),
+  PoolRegistered: topicOf('PoolRegistered(address,address,uint256)'),
+  PoolRemoved: topicOf('PoolRemoved(address,address,uint256)'),
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +269,7 @@ const hexNum = (n: number) => `0x${n.toString(16)}`
 async function getLogs(
   net: RpcClient,
   address: string,
-  topics: (string | null)[] | undefined,
+  topics: (string | string[] | null)[] | undefined,
   from: number,
   to: number,
   progress?: (block: number) => void,
@@ -227,6 +299,118 @@ async function getLogs(
   return out
 }
 
+/** How far back each sync re-reads, so a reorg since the last one cannot leave stale events. */
+const REORG_BLOCKS = 2000
+
+function writeCache(file: string, json: string) {
+  mkdirSync(join(HOME, 'cache'), { recursive: true })
+  writeFileSync(`${file}.tmp`, json)
+  renameSync(`${file}.tmp`, file)
+}
+
+// ---------------------------------------------------------------------------
+// The pools, as the Entrypoint registered them
+// ---------------------------------------------------------------------------
+/** A PoolRegistered or PoolRemoved log. */
+type PoolLog = { block: number; removed: boolean; pool: string; asset: string }
+type Token = { symbol: string; decimals: number }
+/** An Entrypoint's pool logs, in log order, and the symbol and decimals of each asset. */
+export type PoolRegistry = { block: number; logs: PoolLog[]; tokens: Record<string, Token> }
+
+const registryFile = (e: Entrypoint) => join(HOME, 'cache', `${e.chainId}-${e.address.toLowerCase()}-pools.json`)
+
+/**
+ * The pools in `reg`, named by their token's symbol, lowercased. A name is
+ * shared only by tokens with one symbol, or by a pool and its replacement:
+ * the live pool keeps the plain name, the rest get -2, -3 ... by age.
+ */
+export function namePools(e: Entrypoint, reg: PoolRegistry): Pool[] {
+  const byPool = new Map<string, { block: number; asset: string; removed: boolean }>()
+  for (const l of reg.logs) {
+    byPool.set(l.pool, { block: byPool.get(l.pool)?.block ?? l.block, asset: l.asset, removed: l.removed })
+  }
+  const found = [...byPool].flatMap(([address, r]) => {
+    const token = reg.tokens[r.asset]
+    return token ? [{ address, ...r, ...token }] : []
+  })
+  const taken = new Map<string, number>()
+  const keys = new Map<string, string>()
+  for (const p of [...found].sort((a, b) => Number(a.removed) - Number(b.removed) || a.block - b.block)) {
+    // Typeable: Tether writes its symbol USD₮ (USD₮0 on many chains).
+    const base =
+      p.symbol
+        .toLowerCase()
+        .replace(/₮/g, 't')
+        .replace(/[^a-z0-9._-]/g, '') || p.asset.slice(0, 8).toLowerCase()
+    const n = (taken.get(base) ?? 0) + 1
+    taken.set(base, n)
+    keys.set(p.address, n === 1 ? base : `${base}-${n}`)
+  }
+  return found.map((p) => ({
+    chainId: e.chainId,
+    key: keys.get(p.address)!,
+    symbol: p.symbol,
+    decimals: p.decimals,
+    asset: p.asset,
+    address: p.address,
+    deployedBlock: p.block,
+    entrypoint: e.address,
+    removed: p.removed,
+  }))
+}
+
+/**
+ * Every pool the chain's Entrypoint has registered, from its PoolRegistered
+ * and PoolRemoved logs -- cached, and brought up to date on each call, so a
+ * pool added later shows up by itself.
+ */
+export async function pools(net: RpcClient, chainId: number): Promise<Pool[]> {
+  const e = entrypoint(chainId)
+  const file = registryFile(e)
+  const reg: PoolRegistry = existsSync(file)
+    ? JSON.parse(readFileSync(file, 'utf8'))
+    : { block: e.deployedBlock - 1, logs: [], tokens: {} }
+  const head = Number(await net.call('eth_blockNumber'))
+  const from = Math.max(e.deployedBlock, reg.block - REORG_BLOCKS + 1)
+  reg.logs = reg.logs.filter((l) => l.block < from)
+  for (const l of await getLogs(net, e.address, [[TOPIC.PoolRegistered, TOPIC.PoolRemoved]], from, head)) {
+    const removed = l.topics[0] === TOPIC.PoolRemoved
+    const ev = ENTRYPOINT_EVENTS[removed ? 'PoolRemoved' : 'PoolRegistered'].decode(l.topics, l.data)
+    reg.logs.push({
+      block: Number(l.blockNumber),
+      removed,
+      pool: addr.addChecksum(ev._pool),
+      asset: addr.addChecksum(ev._asset),
+    })
+  }
+  for (const { asset } of reg.logs) {
+    if (reg.tokens[asset]) continue
+    if (asset === NATIVE) {
+      reg.tokens[asset] = { symbol: e.native, decimals: 18 }
+      continue
+    }
+    try {
+      const [symbol, decimals] = await Promise.all([read(net, asset, ERC20.symbol), read(net, asset, ERC20.decimals)])
+      reg.tokens[asset] = { symbol, decimals: Number(decimals) }
+    } catch (err) {
+      process.stderr.write(
+        `skipping the pool for ${asset}: its symbol or decimals are unreadable (${(err as Error).message})\n`,
+      )
+    }
+  }
+  reg.block = head
+  writeCache(file, JSON.stringify(reg))
+  return namePools(e, reg)
+}
+
+export async function pool(net: RpcClient, chainId: number, key: string): Promise<Pool> {
+  const all = await pools(net, chainId)
+  const p = all.find((x) => x.key === key.toLowerCase())
+  if (!p)
+    throw new UsageError(`no pool '${key}' on ${chainName(chainId)} -- there are: ${all.map((x) => x.key).join(', ')}`)
+  return p
+}
+
 // ---------------------------------------------------------------------------
 // Pool events, cached per pool
 // ---------------------------------------------------------------------------
@@ -250,9 +434,6 @@ export type PoolEvents = {
   leaves: [bigint, bigint][]
 }
 
-/** How far back each sync re-reads, so a reorg since the last one cannot leave stale events. */
-const REORG_BLOCKS = 2000
-
 const cacheFile = (p: Pool) => join(HOME, 'cache', `${p.chainId}-${p.address.toLowerCase()}.json`)
 
 function loadEvents(p: Pool): PoolEvents {
@@ -264,13 +445,10 @@ function loadEvents(p: Pool): PoolEvents {
 }
 
 function saveEvents(p: Pool, ev: PoolEvents) {
-  mkdirSync(join(HOME, 'cache'), { recursive: true })
-  const tmp = `${cacheFile(p)}.tmp`
-  writeFileSync(
-    tmp,
+  writeCache(
+    cacheFile(p),
     JSON.stringify(ev, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v)),
   )
-  renameSync(tmp, cacheFile(p))
 }
 
 /** Bring a pool's event cache up to the chain head and return it. */
@@ -372,7 +550,7 @@ async function rootCid(net: RpcClient, entrypoint: string, root: bigint): Promis
   for (let end = head, span = 50_000; end > 0; end -= span, span = Math.min(span * 4, 50_000_000)) {
     const logs = await getLogs(net, entrypoint, topic, Math.max(0, end - span + 1), end)
     for (const l of logs.reverse()) {
-      const e = ROOT_UPDATED.decode(l.topics, l.data)
+      const e = ENTRYPOINT_EVENTS.RootUpdated.decode(l.topics, l.data)
       if (e._root === root) return e._ipfsCID
     }
   }
@@ -392,10 +570,7 @@ export async function aspSet(net: RpcClient, p: Pool, scope: bigint, log?: (s: s
     const tree = matching((JSON.parse(readFileSync(file, 'utf8')) as string[]).map(BigInt), root)
     if (tree) return done(tree, 'cache')
   }
-  const save = (tree: LeanIMT) => {
-    mkdirSync(join(HOME, 'cache'), { recursive: true })
-    writeFileSync(file, JSON.stringify(tree.levels[0]!.map(String)))
-  }
+  const save = (tree: LeanIMT) => writeCache(file, JSON.stringify(tree.levels[0]!.map(String)))
 
   const cid = await rootCid(net, p.entrypoint, root)
   for (const gw of IPFS_GATEWAYS) {

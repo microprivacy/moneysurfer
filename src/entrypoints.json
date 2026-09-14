@@ -1,0 +1,20 @@
+{
+  "1": {
+    "address": "0x6818809EefCe719E480a7526D76bD3e561526b46",
+    "deployedBlock": 22153713,
+    "native": "ETH",
+    "relayers": ["https://fastrelay.xyz/relayer", "https://api.clkd.xyz/relayer"]
+  },
+  "10": {
+    "address": "0x44192215FEd782896BE2CE24E0Bfbf0BF825d15E",
+    "deployedBlock": 144288142,
+    "native": "ETH",
+    "relayers": ["https://fastrelay.xyz/relayer"]
+  },
+  "42161": {
+    "address": "0x44192215FEd782896BE2CE24E0Bfbf0BF825d15E",
+    "deployedBlock": 404391809,
+    "native": "ETH",
+    "relayers": ["https://fastrelay.xyz/relayer"]
+  }
+}

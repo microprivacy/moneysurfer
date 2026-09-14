@@ -93,51 +93,46 @@ export const ASP_API = 'https://api.0xbow.io'
 
 export type Pool = {
   chainId: number
+  /** what commands call it: the token's symbol, lowercased */
   key: string
   symbol: string
   decimals: number
   /** 0xEeee...EEeE for the native coin */
   asset: string
   address: string
+  /** where the Entrypoint registered it -- the pool has no events before */
   deployedBlock: number
   entrypoint: string
+  /** taken off the Entrypoint: it takes no deposits and relays nothing, but its notes can still be ragequit */
+  removed: boolean
 }
 
 export const NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
-type ChainEntry = {
-  entrypoint: string
+/** A chain's Entrypoint: its pools are whatever it has registered (chain.ts `pools`). */
+export type Entrypoint = {
+  chainId: number
+  address: string
+  deployedBlock: number
+  /** the chain's coin, which names its native-asset pool */
+  native: string
   relayers: string[]
-  pools: Record<string, Omit<Pool, 'chainId' | 'key' | 'entrypoint'>>
 }
 
-/** chain id -> the Entrypoint, its relayers and its pools. MONEYSURFER_POOLS points it elsewhere, e.g. a fork. */
-function registry(): Record<string, ChainEntry> {
-  return JSON.parse(readFileSync(process.env.MONEYSURFER_POOLS ?? join(ROOT, 'src/pools.json'), 'utf8'))
+/** chain id -> its Entrypoint and relayers. MONEYSURFER_ENTRYPOINTS points it elsewhere, e.g. a fork. */
+function registry(): Record<string, Omit<Entrypoint, 'chainId'>> {
+  return JSON.parse(readFileSync(process.env.MONEYSURFER_ENTRYPOINTS ?? join(ROOT, 'src/entrypoints.json'), 'utf8'))
 }
 
 export const registryChains = () => Object.keys(registry()).map(Number)
 
-function chainEntry(chainId: number): ChainEntry {
-  const c = registry()[chainId]
-  if (!c) {
+export function entrypoint(chainId: number): Entrypoint {
+  const e = registry()[chainId]
+  if (!e) {
     const known = registryChains()
       .map((id) => `${chainName(id)} (${id})`)
       .join(', ')
-    throw new UsageError(`no pools on ${chainName(chainId)} -- supported: ${known}`)
+    throw new UsageError(`no Privacy Pools on ${chainName(chainId)} -- supported: ${known}`)
   }
-  return c
+  return { ...e, chainId }
 }
-
-export function pools(chainId: number): Pool[] {
-  const c = chainEntry(chainId)
-  return Object.entries(c.pools).map(([key, p]) => ({ ...p, key, chainId, entrypoint: c.entrypoint }))
-}
-
-export function pool(chainId: number, key: string): Pool {
-  const p = pools(chainId).find((x) => x.key === key.toLowerCase())
-  if (!p) throw new UsageError(`no pool '${key}' on ${chainName(chainId)} (see: moneysurfer pools)`)
-  return p
-}
-
-export const relayersFor = (chainId: number) => chainEntry(chainId).relayers

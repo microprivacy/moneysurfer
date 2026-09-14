@@ -4,7 +4,8 @@ Lightweight CLI for [Privacy Pools](https://privacypools.com).
 
 ## Features
 
-- Ethereum, Optimism and Arbitrum ETH pools
+- Every pool on Ethereum, Optimism and Arbitrum: ETH, USDC, USDT, DAI, USDS, sUSDS, wstETH, WBTC and
+  the rest — read from the Entrypoints' own registrations, so new pools show up by themselves
 - One mnemonic derives every note — nothing else to back up. Same keys as 0xbow's SDK, so accounts
   made on privacypools.com carry over, including wallet-derived ones (`init --from-wallet`)
 - The ASP's association set comes from the IPFS copy it publishes with every root, checked against
@@ -31,15 +32,20 @@ moneysurfer init    # or: init --import < words.txt, or init --from-wallet
 ```sh
 moneysurfer pools
 moneysurfer deposit eth 0.1 --chain optimism
+moneysurfer deposit usdc 100 --chain optimism
 moneysurfer balance
-moneysurfer withdraw eth 0.05 0xRecipient --chain optimism
+moneysurfer withdraw usdc 50 0xRecipient --chain optimism
 ```
+
+A token deposit is two transactions: an approval for exactly the amount, then the deposit.
+Relayers price some tokens far above their gas cost (Fast Relay has quoted USDS and sUSDS at 10–56%);
+`--max-fee-percent` (1% by default) refuses those, and `--self` withdraws without one.
 
 A deposit can be withdrawn privately once the ASP approves it, which takes up to 7 days; ETH that
 came out of Tornado Cash is held until you complete a proof of association. Until then — or if it is
 declined — `ragequit` returns it publicly to the depositing address.
 
-Not yet supported: ERC-20 pools, and accounts privacypools.com created before its key-derivation fix.
+Not yet supported: accounts privacypools.com created before its key-derivation fix.
 Run `moneysurfer help` for all commands and options.
 
 ## License
