@@ -597,16 +597,19 @@ async function simulate(
 }
 
 /**
- * Where a proposal spending account `a` goes in the Safe's queue: at the
- * nonce of one that spends it already -- both cannot execute, and queued
- * behind it this one could only revert -- else after everything queued.
+ * Where a proposal spending account `a` goes in the Safe's queue: after
+ * everything waiting, even one that spends the account already. Two of those
+ * cannot both execute, so say so rather than quietly take the other's nonce.
  */
 async function spendNonce(net: RpcClient, safe: string, a: Account, privateNullifyingKey: bigint): Promise<bigint> {
   const q = await safeQueue(net, CHAIN_ID, safe)
   const same = queuedWith(q, nullifierOf(privateNullifyingKey, a.note.commitment))
-  if (!same) return nextNonce(q)
-  log(`account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; this one takes its place`)
-  return same.nonce
+  if (same) {
+    log(
+      `account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; both spend the account, so whichever the owners execute first leaves the other to revert -- reject that one in the Safe app to clear its nonce`,
+    )
+  }
+  return nextNonce(q)
 }
 
 /**

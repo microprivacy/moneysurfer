@@ -261,15 +261,18 @@ async function allow(net: RpcClient, signer: Signer, p: Pool, amount: bigint) {
 }
 
 /**
- * Where a proposal spending account `a` goes in the Safe's queue: at the
- * nonce of one that spends it already -- both cannot execute, and queued
- * behind it this one could only revert -- else after everything queued.
+ * Where a proposal spending account `a` goes in the Safe's queue: after
+ * everything waiting, even one that spends the account already. Two of those
+ * cannot both execute, so say so rather than quietly take the other's nonce.
  */
 function spendNonce(q: SafeQueue, a: Account): bigint {
   const same = queuedWith(q, nullifierHash(a.note.secrets))
-  if (!same) return nextNonce(q)
-  log(`account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; this one takes its place`)
-  return same.nonce
+  if (same) {
+    log(
+      `account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; both spend the account, so whichever the owners execute first leaves the other to revert -- reject that one in the Safe app to clear its nonce`,
+    )
+  }
+  return nextNonce(q)
 }
 
 /** A deposit by a Safe, proposed to its owners: one SafeTx, with any approval a token needs batched in. */

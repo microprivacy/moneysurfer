@@ -241,7 +241,6 @@ export async function proposeSafeTx(o: {
         contractTransactionHash: safeTxHash,
         sender: o.signer.address,
         signature,
-        origin: 'moneysurfer',
       },
       (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
     ),
