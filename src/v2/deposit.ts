@@ -14,6 +14,7 @@
  * forwards the third argument to the ASPRegistry untouched.
  */
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
+import type { SafeQueue } from '../shared/safe.ts'
 import { encodeOpening } from './asp.ts'
 import { ENTRYPOINT } from './chain.ts'
 import { ASP_PUBLIC_KEY, ENTRYPOINT_ADDR, isNative, NATIVE, UsageError } from './config.ts'
@@ -122,3 +123,23 @@ export const asTransaction = (d: Deposit, from: string) => ({
   data: `0x${bytesToHex(d.data)}`,
   value: `0x${d.value.toString(16)}`,
 })
+
+/**
+ * The deposits of `tokenId` waiting in a Safe's queue, read off their proofs.
+ * A deposit's public signals are (commitment, tokenId, value, context), four
+ * adjacent words in the calldata whether the Entrypoint or a PPRouter is
+ * called, and batched or not. A stray match elsewhere only costs a skipped index.
+ */
+export function queuedDeposits(q: SafeQueue, tokenId: string): { commitment: bigint; value: bigint }[] {
+  const tok = BigInt(tokenId).toString(16).padStart(64, '0')
+  const found: { commitment: bigint; value: bigint }[] = []
+  for (const { data } of q.queued) {
+    for (let i = data.indexOf(tok); i !== -1; i = data.indexOf(tok, i + 1)) {
+      const before = data.slice(i - 64, i)
+      const after = data.slice(i + 64, i + 128)
+      if (i < 64 || after.length < 64 || !/^[0-9a-f]+$/.test(before + after)) continue
+      found.push({ commitment: BigInt(`0x${before}`), value: BigInt(`0x${after}`) })
+    }
+  }
+  return found
+}

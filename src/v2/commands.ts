@@ -28,7 +28,7 @@ import type { RpcClient } from 'micro-eth-signer/net.js'
 import { formatUnits, parseUnits } from 'micro-eth-signer/utils.js'
 import { type Common, checksummed, type Flags } from '../shared/flags.ts'
 import { assertChain, read, rpc } from '../shared/rpc.ts'
-import { batch, nextNonce, prepareSafeTx, proposeSafeTx, type SafeCall, safeQueue } from '../shared/safe.ts'
+import { batch, nextNonce, prepareSafeTx, proposeSafeTx, queuedWith, type SafeCall, safeQueue } from '../shared/safe.ts'
 import { makeSigner, type Signer } from '../shared/signer.ts'
 import { type Account, recover, spendable } from './account.ts'
 import { fetchArtifact, have, pinned, verificationKey } from './artifacts.ts'
@@ -83,10 +83,10 @@ import {
   secretDerivationTypedData,
   transactContext,
 } from './crypto.ts'
-import { buildDeposit, NO_NOTE } from './deposit.ts'
+import { buildDeposit, NO_NOTE, queuedDeposits } from './deposit.ts'
 import { ragequit as ragequitWitness, transact as transactWitness } from './notes.ts'
 import { prove, solidityProof } from './prover.ts'
-import { assertRouter, explainRouterRevert, quote, ROUTER, sharesFor } from './zap.ts'
+import { assertRouter, explainRouterRevert, HEADROOM_PPM, quote, ROUTER, sharesFor } from './zap.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
 const out = (s: string) => process.stdout.write(`${s}\n`)
@@ -201,8 +201,7 @@ async function setup(which: string[]) {
       }
       log(`downloading ${c}.${kind} ...`)
       const bytes = await fetchArtifact(c, kind)
-      const want = pinned(c, kind)
-      log(`  ${bytes.length} bytes${want ? `, sha256 ${want} matches` : ' (pinned by CID only)'}`)
+      log(`  ${bytes.length} bytes, sha256 ${pinned(c, kind)} matches`)
     }
     out(`${c}: nPublic ${verificationKey(c).nPublic}`)
   }
@@ -414,14 +413,20 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     )
   }
 
-  // The next unused deposit index for this asset; the walk skips one whose
-  // commitment the pool already holds, so a pending deposit is not reused.
+  // The next unused deposit index for this asset. The walk skips one whose
+  // commitment the pool already holds (mined since the last sync), and one a
+  // deposit waiting in the Safe's queue has claimed -- whatever its value, or
+  // two deposits would share secrets and `recover` would find only one.
   const ev = await sync(net)
   const { nextIndex } = recover(keys, root, owner, [asset.tokenId], ev)
+  const queue = c.safe ? await safeQueue(net, CHAIN_ID, c.safe) : undefined
+  const waiting = queue ? queuedDeposits(queue, asset.tokenId) : []
   let index = nextIndex.get(asset.tokenId.toLowerCase()) ?? 0n
   for (;;) {
-    const c0 = commitmentAt(asset.tokenId, owner, depositSecrets(root, asset.tokenId, index), value)
-    if ((await read(net, POOL_ADDR, POOL.commitments, c0)) === 0n) break
+    const s = depositSecrets(root, asset.tokenId, index)
+    const claimed = waiting.some((w) => commitmentAt(asset.tokenId, owner, s, w.value) === w.commitment)
+    if (!claimed && (await read(net, POOL_ADDR, POOL.commitments, commitmentAt(asset.tokenId, owner, s, value))) === 0n)
+      break
     index++
   }
 
@@ -465,7 +470,13 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     const calls: SafeCall[] = []
     if (approvalToken) calls.push(...(await allowCalls(net, c.safe, approvalToken, approvalSpender, approvalAmount)))
     calls.push({ to: call.to, value: call.value, data: call.data })
-    return proposeCalls(net, c, calls, `the deposit; it becomes account #${index + 1n} when executed`)
+    return proposeCalls(
+      net,
+      c,
+      calls,
+      `the deposit; it becomes account #${index + 1n} when executed`,
+      nextNonce(queue!),
+    )
   }
 
   const signer = await signerFor(net, c, owner)
@@ -547,14 +558,14 @@ async function wrappedCall(
   const r = asset.router!
   await assertRouter(net, r.address, asset.tokenId, ENTRYPOINT_ADDR)
   // --max-fee-percent caps the premium over the quote, as it caps a relayer's
-  // fee on the way out. The SDK's own default is one part per million; this
-  // takes the larger of that and what the operator allowed.
-  const ppm = BigInt(Math.max(1, Math.round(c.maxFeePercent * 10_000)))
+  // fee on the way out. Unset, it is the SDK's one part per million -- V1's
+  // default of 1% for a relayer fee would be far too generous a bound here.
+  const ppm = c.maxFeePercent === undefined ? HEADROOM_PPM : BigInt(Math.max(1, Math.round(c.maxFeePercent * 10_000)))
   const q = await quote(net, r.address, value, ppm)
   const u = units(asset)
   log(`  wrapping: ${formatUnits(q.underlyingNeeded, u.decimals)} ${u.symbol} buys ${amountOf(asset, q.total)}`)
   log(
-    `  at most  ${formatUnits(q.maxUnderlyingIn, u.decimals)} ${u.symbol} will be taken (${c.maxFeePercent}% over the quote);`,
+    `  at most  ${formatUnits(q.maxUnderlyingIn, u.decimals)} ${u.symbol} will be taken (${Number(ppm) / 10_000}% over the quote);`,
   )
   log('    above that the router reverts and nothing moves')
   const args = {
@@ -586,15 +597,28 @@ async function simulate(
 }
 
 /**
+ * Where a proposal spending account `a` goes in the Safe's queue: at the
+ * nonce of one that spends it already -- both cannot execute, and queued
+ * behind it this one could only revert -- else after everything queued.
+ */
+async function spendNonce(net: RpcClient, safe: string, a: Account, privateNullifyingKey: bigint): Promise<bigint> {
+  const q = await safeQueue(net, CHAIN_ID, safe)
+  const same = queuedWith(q, nullifierOf(privateNullifyingKey, a.note.commitment))
+  if (!same) return nextNonce(q)
+  log(`account #${a.index + 1n} has a proposal waiting at nonce ${same.nonce} already; this one takes its place`)
+  return same.nonce
+}
+
+/**
  * Sign a SafeTx and hand it to the Safe's owners. The Safe is then the
  * depositor and the owner of every note -- V1's rule, and in V2 it also means
  * the Keystore registration has to be the Safe's.
  */
-async function proposeCalls(net: RpcClient, c: Common, calls: SafeCall[], what: string) {
+async function proposeCalls(net: RpcClient, c: Common, calls: SafeCall[], what: string, at?: bigint) {
   const safe = c.safe!
-  // After everything already waiting: a proposal queued behind one that has
-  // not executed yet would only revert.
-  const nonce = nextNonce(await safeQueue(net, CHAIN_ID, safe))
+  // After everything already waiting, unless the caller placed it: a proposal
+  // queued behind one that has not executed yet would only revert.
+  const nonce = at ?? nextNonce(await safeQueue(net, CHAIN_ID, safe))
   const call = calls.length > 1 ? batch(calls) : calls[0]!
   // prepareSafeTx simulates the call as the Safe would run it, so a dry run
   // still proves the batch executes -- it just never asks anyone to sign.
@@ -711,7 +735,8 @@ async function withdraw(
     notes: notes.map((n) => ({ hint: hexToBytes(n.hint.slice(2)), ciphertext: n.ciphertext })),
   })
   const call = { to: POOL_ADDR, value: 0n, data: calldata }
-  if (c.safe) return proposeCalls(net, c, [{ ...call }], 'the withdrawal')
+  if (c.safe)
+    return proposeCalls(net, c, [call], 'the withdrawal', await spendNonce(net, c.safe, a, keys.privateNullifyingKey))
   await simulate(net, signer.address, call, asset)
   log('simulated: the pool accepts it')
   if (c.dryRun) {
@@ -761,7 +786,8 @@ async function ragequit(key: string | undefined, v: Flags, c: Common) {
   const data = POOL.ragequit.encodeInput({ pA: s.pA, pB: s.pB, pC: s.pC, pubSignals: s.pubSignals as never })
   const call = { to: POOL_ADDR, value: 0n, data }
   log(`ragequitting ${amountOf(asset, a.note.value)} back to ${owner} -- this is public`)
-  if (c.safe) return proposeCalls(net, c, [call], 'the ragequit')
+  if (c.safe)
+    return proposeCalls(net, c, [call], 'the ragequit', await spendNonce(net, c.safe, a, keys.privateNullifyingKey))
   const signer = await signerFor(net, c, owner)
   await simulate(net, signer.address, call, asset)
   if (c.dryRun) return out(JSON.stringify({ to: call.to, data: hex(data) }, null, 2))
@@ -817,12 +843,13 @@ export const HELP = `moneysurfer v2 -- Privacy Pools V2 from the command line
   v2 status | trees                  the deployment, and both trees rebuilt from logs
 
   --max-fee-percent N                on deposit, how far over the wrapping quote you will go
-                                     (default 1); on withdraw, the relayer fee you will accept
+                                     (default 0.0001, one part per million)
 
-amounts are human units of what you spend. For a wrapped asset (usdc, usdt) that is the
-underlying, while the note's value is in the yield vault's shares -- and a share is worth
+amounts are human units of what you spend. For a wrapped asset (usdc, usdt) a deposit spends
+the underlying, while the note's value is in the yield vault's shares -- and a share is worth
 more than a dollar, so 10 USDC buys under 10 ppUSDC and falls below the minimum. About
-10.02 usdc is the real floor; the error says so with the number of the day.
+10.02 usdc is the real floor; the error says so with the number of the day. A withdrawal
+spends the note, so its amount is in shares, and shares are what it pays out.
 
 Ethereum mainnet only, one deployment, no --chain.
 

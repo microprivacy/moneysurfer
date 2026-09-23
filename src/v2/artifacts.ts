@@ -6,8 +6,9 @@
 /**
  * The circuits' wasm and trusted-setup keys. They are content-addressed, so
  * any gateway will do: what makes a file usable is its sha256 matching the
- * manifest, never where it came from. The verification keys carry no sha256 --
- * their CID is the hash -- so those are trusted only as far as the CID.
+ * manifest, never where it came from. The app pins no sha256 for the
+ * verification keys, so these were pinned here after checking each file
+ * against its CID: a gateway's word alone would decide what a proof must pass.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -23,10 +24,10 @@ const CID: Record<Kind, 'wasm' | 'provingKey' | 'verificationKey'> = {
   vkey: 'verificationKey',
 }
 
-/** The sha256 the manifest pins, or undefined where it pins none. */
-export function pinned(circuit: string, kind: Kind): string | undefined {
+/** The sha256 the manifest pins. */
+export function pinned(circuit: string, kind: Kind): string {
   const a = artifact(circuit)
-  return kind === 'wasm' ? a.wasmSha256 : kind === 'zkey' ? a.provingKeySha256 : undefined
+  return kind === 'wasm' ? a.wasmSha256 : kind === 'zkey' ? a.provingKeySha256 : a.verificationKeySha256
 }
 
 export const path = (circuit: string, kind: Kind) => join(ASSETS, `${circuit}.${kind}`)
@@ -40,8 +41,7 @@ export function load(circuit: string, kind: Kind): Uint8Array {
   const bytes = new Uint8Array(readFileSync(file))
   const want = pinned(circuit, kind)
   const got = bytesToHex(sha256(bytes))
-  if (want && got !== want)
-    throw new Error(`${file} has sha256 ${got}, not the pinned ${want} -- delete it and re-run setup`)
+  if (got !== want) throw new Error(`${file} has sha256 ${got}, not the pinned ${want} -- delete it and re-run setup`)
   return bytes
 }
 
@@ -67,7 +67,7 @@ export async function fetchArtifact(circuit: string, kind: Kind): Promise<Uint8A
       continue
     }
     const got = bytesToHex(sha256(bytes))
-    if (want && got !== want) {
+    if (got !== want) {
       failures.push(`${gateway}: sha256 ${got}, want ${want}`)
       continue
     }

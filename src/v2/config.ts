@@ -165,6 +165,8 @@ export type Artifact = {
   provingKey: string
   provingKeySha256: string
   verificationKey: string
+  /** not in the app's manifest: each file was checked against its CID, then pinned here */
+  verificationKeySha256: string
 }
 
 /**

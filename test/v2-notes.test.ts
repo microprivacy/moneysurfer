@@ -65,7 +65,7 @@ for (const [n, m] of [
 ] as const) {
   const circuit = `transact_${n}x${m}`
   test(`${circuit}: the circuit accepts the witness we build`, {
-    ...(have(circuit, 'wasm') ? {} : { skip: `run \`moneysurfer2 setup ${circuit}\` first` }),
+    ...(have(circuit, 'wasm') ? {} : { skip: `run \`moneysurfer v2 setup ${circuit}\` first` }),
   }, async () => {
     const { notes, outs, trees } = scenario(n, m)
     const t = transact(account, notes, outs, trees, { context: generateSecret() })

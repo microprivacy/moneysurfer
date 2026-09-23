@@ -25,15 +25,15 @@ const ready = (c: string) => have(c, 'zkey') && have(c, 'wasm') && have(c, 'vkey
 
 // The artifacts are ~25 MB, so they are not in the repo: `setup` fetches them.
 const downloaded = ['deposit', 'ragequit', 'transact_1x2'].filter((c) => have(c, 'vkey'))
-const skip = downloaded.length === 0 && { skip: 'run `moneysurfer2 setup` first' }
+const skip = downloaded.length === 0 && { skip: 'run `moneysurfer v2 setup` first' }
 
 test('the manifest pins what the gateways served', { ...skip }, () => {
   for (const c of ['deposit', 'ragequit', 'transact_1x1']) {
-    for (const kind of ['wasm', 'zkey'] as const) {
+    for (const kind of ['wasm', 'zkey', 'vkey'] as const) {
       if (!have(c, kind)) continue
       // load() re-hashes and throws unless it matches; reaching here is the assertion.
       assert.ok(load(c, kind).length > 0, `${c}.${kind}`)
-      assert.match(pinned(c, kind)!, /^[0-9a-f]{64}$/)
+      assert.match(pinned(c, kind), /^[0-9a-f]{64}$/)
     }
   }
 })
@@ -73,7 +73,7 @@ test('solidityProof round-trips a proof off the chain', { ...skip }, () => {
 })
 
 test('a deposit proof we build verifies, and its commitment is our own', {
-  ...(ready('deposit') ? {} : { skip: 'run `moneysurfer2 setup deposit` first' }),
+  ...(ready('deposit') ? {} : { skip: 'run `moneysurfer v2 setup deposit` first' }),
 }, async () => {
   const value = 10n ** 16n
   const noteSecret = generateSecret()

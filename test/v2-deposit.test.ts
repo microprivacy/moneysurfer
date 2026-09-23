@@ -16,12 +16,14 @@ import { test } from 'node:test'
 import { x25519 } from '@noble/curves/ed25519.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { Decoder } from 'micro-eth-signer/abi.js'
+import { batch } from '../src/shared/safe.ts'
 import { have } from '../src/v2/artifacts.ts'
 import { decodeOpening, KEY_BYTES } from '../src/v2/asp.ts'
 import { ENTRYPOINT, ENTRYPOINT_ABI } from '../src/v2/chain.ts'
 import { NATIVE } from '../src/v2/config.ts'
 import { depositContext, generateSecret, noteAddressHash } from '../src/v2/crypto.ts'
-import { buildDeposit, msgValue, NO_NOTE } from '../src/v2/deposit.ts'
+import { buildDeposit, msgValue, NO_NOTE, queuedDeposits } from '../src/v2/deposit.ts'
+import { ROUTER } from '../src/v2/zap.ts'
 
 type Vectors = {
   deposit: {
@@ -84,7 +86,7 @@ test('a deposit that tells nobody anything still binds a context', () => {
 })
 
 test('a whole deposit: the proof, the opening and the calldata all agree', {
-  ...(have('deposit', 'zkey') ? {} : { skip: 'run `moneysurfer2 setup deposit` first' }),
+  ...(have('deposit', 'zkey') ? {} : { skip: 'run `moneysurfer v2 setup deposit` first' }),
 }, async () => {
   const asp = x25519.keygen()
   const owner = '0x1111111111111111111111111111111111111111'
@@ -119,4 +121,36 @@ test('a whole deposit: the proof, the opening and the calldata all agree', {
   assert.equal(parts.proof.pubSignals[0], d.commitment)
   assert.equal(parts.proof.pubSignals[2], value)
   assert.equal(parts.proof.pubSignals[3], d.context)
+})
+
+test('a deposit waiting in a Safe queue is read back off its proof, batched or not', () => {
+  const PP_USDC = '0xC246aFb23482fF9596E9cee5f1f678eFe0EB1ad6'
+  const ROUTER_ADDR = '0x00000000000000000000000000000000000c0de5'
+  const proof = {
+    pA: [1n, 2n] as [bigint, bigint],
+    pB: [
+      [3n, 4n],
+      [5n, 6n],
+    ] as [[bigint, bigint], [bigint, bigint]],
+    pC: [7n, 8n] as [bigint, bigint],
+    pubSignals: [0xc0ffeen, BigInt(PP_USDC), 12_345n, 11n] as never,
+  }
+  const args = {
+    proof,
+    noteData: { hint: new Uint8Array(32), ciphertext: new Uint8Array(0) },
+    aspCiphertext: new Uint8Array(0),
+  }
+  const direct = ENTRYPOINT.deposit.encodeInput(args)
+  const routed = batch([
+    // the approval batched ahead of it: the underlying, not the share token
+    { to: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', value: 0n, data: new Uint8Array(68) },
+    { to: ROUTER_ADDR, value: 0n, data: ROUTER.depositExactShares.encodeInput({ ...args, maxUnderlyingIn: 1n }) },
+  ]).data
+  const q = {
+    nonce: 0n,
+    queued: [direct, routed].map((d, i) => ({ nonce: BigInt(i), data: `0x${bytesToHex(d)}` })),
+  }
+  const want = { commitment: 0xc0ffeen, value: 12_345n }
+  assert.deepEqual(queuedDeposits(q, PP_USDC), [want, want])
+  assert.deepEqual(queuedDeposits(q, NATIVE), [])
 })

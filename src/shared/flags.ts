@@ -58,7 +58,8 @@ export type Common = {
   /** propose to this Safe instead of sending; it is also the depositor and the owner */
   safe?: string
   sig: SignerOpts
-  maxFeePercent: number
+  /** undefined when not given: each protocol has its own default */
+  maxFeePercent?: number
   dryRun: boolean
 }
 

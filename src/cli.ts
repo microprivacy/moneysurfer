@@ -36,15 +36,8 @@ process.stdout.on('error', (e: NodeJS.ErrnoException) => {
 /** A protocol's help, without its own title line, indentation kept. */
 const section = (help: string) => help.split('\n').slice(2).join('\n').replace(/\s+$/, '')
 
-const HELP = `moneysurfer -- Privacy Pools from the command line
-
-  moneysurfer [v1|v2] <command> ...    v1 is assumed for a command only V1 has
-
-${section(v1.HELP)}
-
-${section(v2.HELP)}
-
-shared by both:
+/** The flags both protocols take, so `v1 --help` and `v2 --help` list them too. */
+const SHARED = `shared by both:
   --safe SAFE                        propose to that Safe's owners instead of sending -- signed by
                                      an owner, or a proposer they added. The Safe is then the
                                      depositor, and the only address that can ragequit
@@ -57,6 +50,16 @@ signing -- a local key, or else a wallet (Frame, or the one at --rpc-url):
 
 env: MONEYSURFER_HOME, MONEYSURFER_ASSETS, MONEYSURFER_SAFE_TX_SERVICE, MONEYSURFER_CHUNK,
      MONEYSURFER_PRIVATE_KEY, MONEYSURFER_KEYSTORE_PASSWORD`
+
+const HELP = `moneysurfer -- Privacy Pools from the command line
+
+  moneysurfer [v1|v2] <command> ...    v1 is assumed for a command only V1 has
+
+${section(v1.HELP)}
+
+${section(v2.HELP)}
+
+${SHARED}`
 
 /**
  * Flags a protocol has no use for. Refusing one is better than ignoring it:
@@ -86,7 +89,7 @@ try {
 
   // `moneysurfer v2 --help` narrows to that protocol; a bare --help covers both.
   if (v.help || head === 'help') {
-    out(explicit ? (protocol === 'v2' ? v2.HELP : v1.HELP) : HELP)
+    out(explicit ? `${protocol === 'v2' ? v2.HELP : v1.HELP}\n\n${SHARED}` : HELP)
     process.exit(0)
   }
   for (const { flag, why } of REJECTS[protocol]) {
@@ -96,8 +99,9 @@ try {
   setRpcUrl(v['rpc-url'])
   const threads = v.threads === undefined ? availableParallelism() : Number(v.threads)
   if (!Number.isInteger(threads) || threads < 1) throw new UsageError('--threads must be a positive integer')
-  const maxFeePercent = v['max-fee-percent'] === undefined ? 1 : Number(v['max-fee-percent'])
-  if (!(maxFeePercent >= 0 && maxFeePercent <= 10)) throw new UsageError('--max-fee-percent must be from 0 to 10')
+  const maxFeePercent = v['max-fee-percent'] === undefined ? undefined : Number(v['max-fee-percent'])
+  if (maxFeePercent !== undefined && !(maxFeePercent >= 0 && maxFeePercent <= 10))
+    throw new UsageError('--max-fee-percent must be from 0 to 10')
   const common: Common = {
     threads,
     safe: v.safe === undefined ? undefined : checksummed(v.safe),

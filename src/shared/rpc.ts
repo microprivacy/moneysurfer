@@ -19,6 +19,14 @@ export { isTransientRpcError }
 export class RangeLimitError extends Error {}
 
 /**
+ * A 503, or "unavailable", on eth_getLogs: mevblocker's wording for a range
+ * too wide, and every provider's for being down. Retried briefly before it is
+ * taken as a range limit, so an outage does not halve a sync down to nothing.
+ */
+class UnavailableError extends RangeLimitError {}
+const UNAVAILABLE_RETRIES_MS = [1_000, 3_000]
+
+/**
  * Known wordings of "that block range is too big". Checked before the retry
  * layer sees the error: some providers reuse code -32005 for both range and
  * rate limits, and a range error retried 9 times is 40 s wasted per chunk.
@@ -71,17 +79,17 @@ export function rpc(url: string, { retry = true } = {}): RpcClient {
     }
     // A provider that times out a log query ("Request timeout on the free
     // plan", 408, 504) is saying the range is too heavy, not that it is down.
-    // Same for "service temporarily unavailable" (mevblocker's wording for a
-    // wide eth_getLogs): a narrower query gets an answer immediately.
     const tooWide = (s: string, status?: number) =>
       RANGE_LIMIT.test(s) ||
-      (method === 'eth_getLogs' &&
-        (status === 408 || status === 504 || status === 503 || /time[sd]? ?out|unavailable/i.test(s)))
+      (method === 'eth_getLogs' && (status === 408 || status === 504 || /time[sd]? ?out/i.test(s)))
+    const unavailable = (s: string, status?: number) =>
+      method === 'eth_getLogs' && (status === 503 || /unavailable/i.test(s))
     if (!res.ok) {
       // The canonical reason phrase, not res.statusText: HTTP/2 has none, and
       // the retry layer recognises 502/503/504 by these words.
       const msg = `${method}: HTTP ${res.status} ${STATUS_CODES[res.status] ?? ''} ${text.slice(0, 200)}`
-      throw tooWide(text, res.status) ? new RangeLimitError(msg) : new Error(msg)
+      if (tooWide(text, res.status)) throw new RangeLimitError(msg)
+      throw unavailable(text, res.status) ? new UnavailableError(msg) : new Error(msg)
     }
     const body = JSON.parse(text) as {
       result?: unknown
@@ -94,15 +102,27 @@ export function rpc(url: string, { retry = true } = {}): RpcClient {
       const error = typeof body.error === 'string' ? { message: body.error } : (body.error ?? { message: '' })
       const msg = `${method}: ${error.message || body.message}`
       if (tooWide(msg)) throw new RangeLimitError(msg)
+      if (unavailable(msg)) throw new UnavailableError(msg)
       throw Object.assign(new Error(msg), error)
     }
     return body.result
+  }
+  const patient = async (method: string, params: unknown[]) => {
+    for (const wait of UNAVAILABLE_RETRIES_MS) {
+      try {
+        return await once(method, params)
+      } catch (e) {
+        if (!(e instanceof UnavailableError)) throw e
+        await new Promise((r) => setTimeout(r, wait))
+      }
+    }
+    return once(method, params)
   }
   const client = new RpcClient({
     call: (method: string, ...params: unknown[]) =>
       !retry || NOT_IDEMPOTENT.has(method)
         ? once(method, params)
-        : withRetry(() => once(method, params), undefined, method),
+        : withRetry(() => patient(method, params), undefined, method),
   })
   urls.set(client, url)
   return client

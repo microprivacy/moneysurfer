@@ -709,7 +709,7 @@ export async function run(cmd: string, rest: string[], v: Flags, c: Common): Pro
         relayer: v.relayer,
         self: v.self,
         safe: c.safe,
-        maxFeePercent: c.maxFeePercent,
+        maxFeePercent: c.maxFeePercent ?? 1,
         dryRun: c.dryRun,
         threads: c.threads,
       }),
