@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { recover, spendable } from '../src/account.ts'
-import type { Deposit, PoolEvents, Ragequit, Withdrawal } from '../src/chain.ts'
+import { recover, spendable } from '../src/v1/account.ts'
+import type { Deposit, PoolEvents, Ragequit, Withdrawal } from '../src/v1/chain.ts'
 import {
   commitment,
   depositSecrets,
@@ -14,7 +14,7 @@ import {
   nullifierHash,
   precommitment,
   withdrawalSecrets,
-} from '../src/crypto.ts'
+} from '../src/v1/crypto.ts'
 
 const k = masterKeys('test test test test test test test test test test test junk')
 const other = masterKeys(

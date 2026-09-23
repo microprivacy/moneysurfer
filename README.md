@@ -1,29 +1,33 @@
 # moneysurfer
 
-Lightweight CLI for [Privacy Pools](https://privacypools.com).
+Lightweight CLI for [Privacy Pools](https://privacypools.com) V1 and V2.
+
+```
+moneysurfer [v1|v2] <command> ...
+```
 
 ## Features
 
-- Ethereum, Optimism and Arbitrum: every pool, ETH and tokens
-- One mnemonic for every deposit, same keys as privacypools.com
-- ASP set read from IPFS and checked on-chain; nothing is sent to the ASP
+- Full V1 and V2 support: V1 on Ethereum, Optimism and Arbitrum; V2 on mainnet
+- One seed per protocol
+- Nothing is sent to the ASP
 - Withdraw via a relayer, yourself, or a Safe; ragequit if unapproved
-- Local prover in pure JS (~7 s), withdrawals simulated before sending
+- Local prover in pure JS, everything simulated before sending
 - Sign with Frame, a private key or a keystore
-- No build step
+- No build step, minimal and security audited dependencies
 
 ## Install
 
 Requires Node ≥ 22.18.
 
 ```sh
-pnpm install
-ln -s $PWD/src/cli.ts ~/.local/bin/moneysurfer
-moneysurfer setup   # download circuits and keys, check their pinned sha256
-moneysurfer init    # new mnemonic; or --import < words.txt, or --from-wallet
+moneysurfer setup
+moneysurfer init
 ```
 
 ## Usage
+
+### V1
 
 ```sh
 moneysurfer pools
@@ -32,7 +36,22 @@ moneysurfer balance
 moneysurfer withdraw usdc 50 0xRecipient --chain optimism
 ```
 
-A deposit can be withdrawn once the ASP approves it (up to 7 days); until then `ragequit` returns it publicly.
+A deposit can be withdrawn once the ASP approves it (up to 7 days); until then
+`ragequit` returns it publicly.
+
+### V2
+
+Relayed withdrawals are not supported for v2 yet.
+
+```sh
+moneysurfer v2 setup
+moneysurfer v2 init                # --from-wallet derives the seed the app would
+moneysurfer v2 register            # a Keystore leaf; required before spending
+moneysurfer v2 pools
+moneysurfer v2 deposit usdc 10.02
+moneysurfer v2 withdraw ppusdc 5 0xRecipient --self
+```
+
 Run `moneysurfer help` for all commands and options.
 
 ## License

@@ -10,7 +10,7 @@
  * Local key -- sign here and broadcast raw:
  *   --private-key PK             visible in /proc/<pid>/cmdline while running
  *                                and saved in shell history
- *   URAGAN_PRIVATE_KEY           the same key, kept out of argv
+ *   MONEYSURFER_PRIVATE_KEY      the same key, kept out of argv
  *   --account NAME | --keystore  Web3 Secret Storage (V3) keystore -- the format
  *                                `cast wallet import` writes to ~/.foundry/keystores
  *
@@ -58,7 +58,7 @@ const hexData = (d?: Uint8Array) => (d ? `0x${bytesToHex(d)}` : '0x')
  * the command's RPC, on `chainId`.
  */
 export async function makeSigner(net: RpcClient, chainId: number, o: SignerOpts): Promise<Signer> {
-  const pk = o.privateKey ?? process.env.URAGAN_PRIVATE_KEY
+  const pk = o.privateKey ?? process.env.MONEYSURFER_PRIVATE_KEY
   if (pk) return localSigner(net, pk.startsWith('0x') ? pk : `0x${pk}`)
   if (o.account || o.keystore) {
     const file = o.keystore ?? join(homedir(), '.foundry/keystores', o.account!)
@@ -189,15 +189,15 @@ async function walletSigner(wallet: RpcClient, net: RpcClient, chainId: number, 
   }
 }
 
-/** URAGAN_KEYSTORE_PASSWORD, else a no-echo prompt on /dev/tty (stdin may be carrying the note). */
+/** MONEYSURFER_KEYSTORE_PASSWORD, else a no-echo prompt on /dev/tty (stdin may be carrying the mnemonic). */
 async function password(file: string): Promise<string> {
-  const env = process.env.URAGAN_KEYSTORE_PASSWORD
+  const env = process.env.MONEYSURFER_KEYSTORE_PASSWORD
   if (env !== undefined) return env
   let tty: ReadStream
   try {
     tty = new ReadStream(openSync('/dev/tty', 'r'))
   } catch {
-    throw new UsageError('no terminal for a password prompt; set URAGAN_KEYSTORE_PASSWORD')
+    throw new UsageError('no terminal for a password prompt; set MONEYSURFER_KEYSTORE_PASSWORD')
   }
   process.stderr.write(`password for ${file}: `)
   tty.setRawMode(true)

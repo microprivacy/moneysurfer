@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { namePools, type PoolRegistry } from '../src/chain.ts'
-import { type Entrypoint, NATIVE } from '../src/config.ts'
+import { namePools, type PoolRegistry } from '../src/v1/chain.ts'
+import { type Entrypoint, NATIVE } from '../src/v1/config.ts'
 
 const e: Entrypoint = {
   chainId: 10,

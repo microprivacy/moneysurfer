@@ -71,20 +71,30 @@ export function rpc(url: string, { retry = true } = {}): RpcClient {
     }
     // A provider that times out a log query ("Request timeout on the free
     // plan", 408, 504) is saying the range is too heavy, not that it is down.
+    // Same for "service temporarily unavailable" (mevblocker's wording for a
+    // wide eth_getLogs): a narrower query gets an answer immediately.
     const tooWide = (s: string, status?: number) =>
       RANGE_LIMIT.test(s) ||
-      (method === 'eth_getLogs' && (status === 408 || status === 504 || /time[sd]? ?out/i.test(s)))
+      (method === 'eth_getLogs' &&
+        (status === 408 || status === 504 || status === 503 || /time[sd]? ?out|unavailable/i.test(s)))
     if (!res.ok) {
       // The canonical reason phrase, not res.statusText: HTTP/2 has none, and
       // the retry layer recognises 502/503/504 by these words.
       const msg = `${method}: HTTP ${res.status} ${STATUS_CODES[res.status] ?? ''} ${text.slice(0, 200)}`
       throw tooWide(text, res.status) ? new RangeLimitError(msg) : new Error(msg)
     }
-    const body = JSON.parse(text) as { result?: unknown; error?: { message: string; code?: number; data?: unknown } }
-    if (body.error) {
-      const msg = `${method}: ${body.error.message}`
-      if (tooWide(body.error.message)) throw new RangeLimitError(msg)
-      throw Object.assign(new Error(msg), body.error)
+    const body = JSON.parse(text) as {
+      result?: unknown
+      // the spec says an object; Blockscout answers with a bare string, and
+      // says "Too many requests" in a top-level `message` with a null result
+      error?: string | { message: string; code?: number; data?: unknown }
+      message?: string
+    }
+    if (body.error || (body.result === null && body.message)) {
+      const error = typeof body.error === 'string' ? { message: body.error } : (body.error ?? { message: '' })
+      const msg = `${method}: ${error.message || body.message}`
+      if (tooWide(msg)) throw new RangeLimitError(msg)
+      throw Object.assign(new Error(msg), error)
     }
     return body.result
   }
@@ -99,15 +109,13 @@ export function rpc(url: string, { retry = true } = {}): RpcClient {
 }
 
 /**
- * Refuse to act on a chain through an RPC on another. The same pool address
- * can hold a different pool there, or nothing at all.
+ * Refuse to act through an RPC on another chain. The same pool address can
+ * hold a different pool there, or nothing at all.
  */
 export async function assertChain(net: RpcClient, chainId: number): Promise<void> {
   const got = Number(await net.chainId())
   if (got !== chainId) {
-    throw new UsageError(
-      `${urlOf(net)} is on ${chainName(got)} (${got}), not ${chainName(chainId)} (${chainId}) -- use an RPC for ${chainName(chainId)}`,
-    )
+    throw new UsageError(`${urlOf(net)} is on ${chainName(got)} (${got}), not ${chainName(chainId)} -- use its RPC`)
   }
 }
 

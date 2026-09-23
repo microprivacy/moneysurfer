@@ -3,3 +3,6 @@ assets/
 
 # npm
 node_modules/
+
+# Protocol research notes -- local only, not published
+FINDINGS.md

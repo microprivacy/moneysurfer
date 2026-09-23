@@ -17,6 +17,8 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { addr } from 'micro-eth-signer'
 import { createContract, events } from 'micro-eth-signer/abi.js'
 import type { RpcClient } from 'micro-eth-signer/net.js'
+import { RangeLimitError, read } from '../shared/rpc.ts'
+import { symbolKey, uniqueKeys } from '../shared/symbols.ts'
 import {
   ASP_API,
   chainName,
@@ -30,7 +32,6 @@ import {
   UsageError,
 } from './config.ts'
 import { LeanIMT } from './crypto.ts'
-import { RangeLimitError, read } from './rpc.ts'
 
 // ---------------------------------------------------------------------------
 // Contracts
@@ -340,19 +341,11 @@ export function namePools(e: Entrypoint, reg: PoolRegistry): Pool[] {
     const token = reg.tokens[r.asset]
     return token ? [{ address, ...r, ...token }] : []
   })
-  const taken = new Map<string, number>()
-  const keys = new Map<string, string>()
-  for (const p of [...found].sort((a, b) => Number(a.removed) - Number(b.removed) || a.block - b.block)) {
-    // Typeable: Tether writes its symbol USD₮ (USD₮0 on many chains).
-    const base =
-      p.symbol
-        .toLowerCase()
-        .replace(/₮/g, 't')
-        .replace(/[^a-z0-9._-]/g, '') || p.asset.slice(0, 8).toLowerCase()
-    const n = (taken.get(base) ?? 0) + 1
-    taken.set(base, n)
-    keys.set(p.address, n === 1 ? base : `${base}-${n}`)
-  }
+  // Live pools claim the bare name first; a removed one, or a later
+  // replacement, falls back to -2, -3 by age.
+  const ordered = [...found].sort((a, b) => Number(a.removed) - Number(b.removed) || a.block - b.block)
+  const named = uniqueKeys(ordered, (p) => symbolKey(p.symbol, p.asset))
+  const keys = new Map([...named].map(([p, key]) => [p.address, key]))
   return found.map((p) => ({
     chainId: e.chainId,
     key: keys.get(p.address)!,

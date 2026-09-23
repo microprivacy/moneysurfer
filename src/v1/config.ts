@@ -4,16 +4,28 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { ASSETS_ROOT, CHAINS, chainName, HOME_ROOT, ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
 
-/** A mistake in how the command was invoked -- printed without a stack trace. */
-export class UsageError extends Error {}
+// The chain table, Safe service, wallet port and --rpc-url state are shared
+// with V2; they are re-exported so this protocol's modules keep importing
+// everything from one place.
+export {
+  chainName,
+  customRpc,
+  FRAME_RPC,
+  LOG_CHUNK,
+  parseChain,
+  ROOT,
+  SAFE_TX_SERVICE,
+  safePrefix,
+  setRpcUrl,
+  UsageError,
+} from '../shared/config.ts'
 
-export const ROOT = fileURLToPath(new URL('..', import.meta.url))
-export const ASSETS = process.env.MONEYSURFER_ASSETS ?? join(ROOT, 'assets')
-export const HOME = process.env.MONEYSURFER_HOME ?? join(homedir(), '.local/share/moneysurfer')
+/** V1 keeps the artifact and state directories it always had. */
+export const ASSETS = ASSETS_ROOT
+export const HOME = HOME_ROOT
 
 /**
  * The circuits' wasm and the trusted-setup keys, as privacypools.com serves
@@ -28,66 +40,14 @@ export const ARTIFACTS: Record<string, string> = {
   'commitment.zkey': '494ae92d64098fda2a5649690ddc5821fcd7449ca5fe8ef99ee7447544d7e1f3',
 }
 
-/**
- * Supported chains, each with the public RPC used unless --rpc-url is given:
- * ones that serve logs over wide block ranges without a key. `safe` is the
- * chain's EIP-3770 short name, which the Safe Transaction Service and app
- * address it by.
- */
-const CHAINS: Record<number, { name: string; rpc: string; safe: string }> = {
-  1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co', safe: 'eth' },
-  10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co', safe: 'oeth' },
-  42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co', safe: 'arb1' },
-}
-
-export const chainName = (id: number) => CHAINS[id]?.name ?? `chain ${id}`
-
-/** The chain's EIP-3770 short name, for the Safe Transaction Service and app. */
-export function safePrefix(chainId: number): string {
-  const prefix = CHAINS[chainId]?.safe
-  if (!prefix) throw new UsageError(`no Safe Transaction Service known for ${chainName(chainId)}`)
-  return prefix
-}
-
-/** Where Safe proposals go; MONEYSURFER_SAFE_TX_SERVICE points at a self-hosted service. */
-export const SAFE_TX_SERVICE = process.env.MONEYSURFER_SAFE_TX_SERVICE ?? 'https://api.safe.global/tx-service'
-
-/** Frame's local JSON-RPC: the signer when neither a key nor --rpc-url is given. */
-export const FRAME_RPC = 'http://127.0.0.1:1248'
-
-/** A --chain value: a name (ethereum, optimism, arbitrum) or a chain id. */
-export function parseChain(v: string): number {
-  if (/^\d+$/.test(v)) return Number(v)
-  const hit = Object.entries(CHAINS).find(([, c]) => c.name.toLowerCase() === v.toLowerCase())
-  if (!hit) {
-    const names = Object.values(CHAINS)
-      .map((c) => c.name.toLowerCase())
-      .join(', ')
-    throw new UsageError(`unknown chain '${v}' -- ${names}, or a chain id`)
-  }
-  return Number(hit[0])
-}
-
-let rpcOverride: string | undefined
-
-export function setRpcUrl(url: string | undefined): void {
-  rpcOverride = url
-}
-
-export const customRpc = () => rpcOverride !== undefined
-
 /** --rpc-url if given, else the chain's default. */
 export function rpcUrl(chain: number): string {
-  if (rpcOverride !== undefined) return rpcOverride
+  const override = rpcOverrideUrl()
+  if (override !== undefined) return override
   const url = CHAINS[chain]?.rpc
   if (!url) throw new UsageError(`no default RPC for ${chainName(chain)} -- pass --rpc-url`)
   return url
 }
-
-/**
- * The first eth_getLogs block range; sync resizes it by what comes back.
- */
-export const LOG_CHUNK = Number(process.env.MONEYSURFER_CHUNK ?? 50_000)
 
 /**
  * Gateways for the IPFS copy of the ASP's tree. Any of them may lie: the tree
@@ -133,7 +93,7 @@ export type Entrypoint = {
 
 /** chain id -> its Entrypoint and relayers. MONEYSURFER_ENTRYPOINTS points it elsewhere, e.g. a fork. */
 function registry(): Record<string, Omit<Entrypoint, 'chainId'>> {
-  return JSON.parse(readFileSync(process.env.MONEYSURFER_ENTRYPOINTS ?? join(ROOT, 'src/entrypoints.json'), 'utf8'))
+  return JSON.parse(readFileSync(process.env.MONEYSURFER_ENTRYPOINTS ?? join(ROOT, 'src/v1/entrypoints.json'), 'utf8'))
 }
 
 export const registryChains = () => Object.keys(registry()).map(Number)

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { ARTIFACTS, ASSETS } from '../src/config.ts'
+import { ARTIFACTS, ASSETS } from '../src/v1/config.ts'
 import {
   commitment,
   depositSecrets,
@@ -17,8 +17,8 @@ import {
   relayData,
   withdrawalContext,
   withdrawalSecrets,
-} from '../src/crypto.ts'
-import { prove, solidityProof } from '../src/prover.ts'
+} from '../src/v1/crypto.ts'
+import { prove, solidityProof } from '../src/v1/prover.ts'
 
 const skip = !Object.keys(ARTIFACTS).every((f) => existsSync(join(ASSETS, f))) && 'run `moneysurfer setup` first'
 const k = masterKeys('test test test test test test test test test test test junk')

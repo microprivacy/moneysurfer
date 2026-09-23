@@ -21,7 +21,7 @@ import {
   seedTypedData,
   withdrawalContext,
   withdrawalSecrets,
-} from '../src/crypto.ts'
+} from '../src/v1/crypto.ts'
 
 // Produced by 0xbow's own dependencies (viem, maci-crypto, @zk-kit/lean-imt)
 const v = JSON.parse(readFileSync(new URL('./vectors.json', import.meta.url), 'utf8'))
