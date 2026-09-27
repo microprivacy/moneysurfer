@@ -1,6 +1,9 @@
 {
   "name": "@microprivacy/moneysurfer",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "license": "MPL-2.0",
-  "exports": "./mod.ts"
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./src/cli.ts"
+  }
 }

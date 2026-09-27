@@ -18,7 +18,11 @@ moneysurfer [v1|v2] <command> ...
 
 ## Install
 
-Requires Node ≥ 22.18.
+```sh
+pnpm i jsr:@microprivacy/moneysurfer
+```
+
+Then fetch the circuits and make a seed:
 
 ```sh
 moneysurfer setup
