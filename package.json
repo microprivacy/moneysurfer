@@ -1,13 +1,23 @@
 {
   "name": "moneysurfer",
-  "description": "Privacy Pools client: TypeScript on Node and noble cryptography",
+  "version": "0.0.1",
+  "description": "Lightweight CLI for Privacy Pools V1 and V2",
   "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/microprivacy/moneysurfer.git"
+  },
   "type": "module",
   "packageManager": "pnpm@12.3.4+sha512.961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457",
   "bin": {
-    "moneysurfer": "./src/cli.ts"
+    "moneysurfer": "./dist/src/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json && cp src/v1/entrypoints.json dist/src/v1/ && cp src/v2/circuit-artifacts.json dist/src/v2/",
+    "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "format": "biome check --write",

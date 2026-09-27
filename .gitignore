@@ -4,5 +4,8 @@ assets/
 # npm
 node_modules/
 
+# Emitted for the npm package only; everything else runs the sources
+dist/
+
 # Protocol research notes -- local only, not published
 FINDINGS.md
