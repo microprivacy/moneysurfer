@@ -12,5 +12,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      # jsr publish runs deno with --unstable-byonm, so bare npm specifiers are
+      # resolved from node_modules and it has to be there. Deno reads a hoisted
+      # layout; pnpm's default symlinked one it may not follow.
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --config.node-linker=hoisted
       - name: Publish package
         run: npx jsr publish
