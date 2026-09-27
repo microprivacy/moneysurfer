@@ -671,7 +671,7 @@ async function ragequit(
 }
 
 // ---------------------------------------------------------------------------
-export const HELP = `moneysurfer v1 -- Privacy Pools from the command line
+export const HELP: string = `moneysurfer v1 -- Privacy Pools V1 from the command line
 
   setup                              fetch the circuits, check their pinned sha256
   init                               make a new mnemonic (the one secret behind every note)

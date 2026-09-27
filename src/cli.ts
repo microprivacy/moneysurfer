@@ -51,7 +51,7 @@ signing -- a local key, or else a wallet (Frame, or the one at --rpc-url):
 env: MONEYSURFER_HOME, MONEYSURFER_ASSETS, MONEYSURFER_SAFE_TX_SERVICE, MONEYSURFER_CHUNK,
      MONEYSURFER_PRIVATE_KEY, MONEYSURFER_KEYSTORE_PASSWORD`
 
-const HELP = `moneysurfer -- Privacy Pools from the command line
+const HELP = `moneysurfer -- Lightweight CLI for Privacy Pools V1 and V2
 
   moneysurfer [v1|v2] <command> ...    v1 is assumed for a command only V1 has
 

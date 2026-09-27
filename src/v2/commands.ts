@@ -828,7 +828,7 @@ async function trees() {
 }
 
 // ---------------------------------------------------------------------------
-export const HELP = `moneysurfer v2 -- Privacy Pools V2 from the command line
+export const HELP: string = `moneysurfer v2 -- Privacy Pools V2 from the command line
 
   v2 setup [circuit...]              fetch the circuits, check their pinned sha256
   v2 init                            make a new seed (the one secret behind every note)
