@@ -14,7 +14,8 @@ moneysurfer [v1|v2] <command> ...
 - Withdraw via a relayer, yourself, or a Safe; ragequit if unapproved
 - Local prover in pure JS, everything simulated before sending
 - Sign with Frame, a private key or a keystore
-- No build step, minimal and security audited dependencies
+- Minimal and security audited dependencies, bundled in: an install adds one package
+- Node runs the sources as they are; only the published bundle is built
 
 ## Install
 
