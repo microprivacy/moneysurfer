@@ -10,7 +10,7 @@ moneysurfer [v1|v2] <command> ...
 
 - Full V1 and V2 support: V1 on Ethereum, Optimism and Arbitrum; V2 on mainnet
 - One seed per protocol
-- Nothing is sent to the ASP; its set is read off the chain
+- Nothing is sent to the ASP; its set is read from the chain
 - Withdraw via a relayer (V1), yourself, or a Safe; ragequit if unapproved
 - Local prover in pure JS, everything simulated before sending
 - Sign with Frame, a private key or a keystore
