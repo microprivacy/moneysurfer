@@ -24,9 +24,13 @@ export const ROOT = fileURLToPath(new URL('../..', import.meta.url))
  * Where circuit artifacts and per-protocol state live. Each protocol takes a
  * subdirectory of its own where it needs one, so V1's and V2's caches and
  * seeds never meet.
+ *
+ * Artifacts sit beside the notes rather than in the checkout: installed from a
+ * registry, the checkout is somebody's global node_modules -- often unwritable,
+ * and emptied by the next upgrade.
  */
-export const ASSETS_ROOT = process.env.MONEYSURFER_ASSETS ?? join(ROOT, 'assets')
 export const HOME_ROOT = process.env.MONEYSURFER_HOME ?? join(homedir(), '.local/share/moneysurfer')
+export const ASSETS_ROOT = process.env.MONEYSURFER_ASSETS ?? join(HOME_ROOT, 'assets')
 
 /**
  * Supported chains, each with the public RPC used unless --rpc-url is given:

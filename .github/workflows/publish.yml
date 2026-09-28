@@ -1,8 +1,8 @@
 name: Publish
 on:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 jobs:
   publish:
@@ -12,10 +12,25 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+      # Trusted publishing wants npm 11.5.1+; the runner's Node 22 ships npm 10.
+      - run: npm i -g npm@latest
       # jsr publish resolves bare specifiers from a hoisted node_modules.
       - name: Install dependencies
         run: |
           corepack enable
           pnpm install --frozen-lockfile --config.node-linker=hoisted
-      - name: Publish package
+      # Both registries take the version from a manifest, not from the tag, and
+      # neither lets you replace a version once it is out.
+      - name: Check the tag against both manifests
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          for f in package.json jsr.json; do
+            v=$(node -p "require('./$f').version")
+            [ "$v" = "$tag" ] || { echo "$f says $v, tag says $tag"; exit 1; }
+          done
+      - name: Publish to JSR
         run: npx jsr publish
+      - name: Publish to npm
+        run: |
+          pnpm build
+          npm publish
