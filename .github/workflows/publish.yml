@@ -18,7 +18,9 @@ jobs:
         run: |
           corepack enable
           pnpm install --frozen-lockfile
-      - name: Publish package
+      # Staged, not published: the trust relationship allows `npm stage publish`
+      # only, and a maintainer approves the version with 2FA afterwards.
+      - name: Stage package
         run: |
           pnpm build
-          npm publish
+          npm stage publish
