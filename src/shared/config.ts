@@ -12,13 +12,9 @@
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 /** A mistake in how the command was invoked -- printed without a stack trace. */
 export class UsageError extends Error {}
-
-/** The package root: two levels up from src/shared. */
-export const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
 /**
  * Where circuit artifacts and per-protocol state live. Each protocol takes a

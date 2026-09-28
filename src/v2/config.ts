@@ -3,9 +3,9 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ASSETS_ROOT, HOME_ROOT, ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
+import { ASSETS_ROOT, HOME_ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
+import CIRCUIT_ARTIFACTS from './circuit-artifacts.json' with { type: 'json' }
 
 // Chains, the Safe service, the wallet port and --rpc-url are shared with V1.
 export {
@@ -14,7 +14,6 @@ export {
   FRAME_RPC,
   LOG_CHUNK,
   parseChain,
-  ROOT,
   SAFE_TX_SERVICE,
   safePrefix,
   setRpcUrl,
@@ -174,9 +173,7 @@ export type Artifact = {
  * hardcodes them. `deposit`, `ragequit` and `transact_1x1` were fetched and
  * checked; see FINDINGS.md.
  */
-export const CIRCUITS: Record<string, Artifact> = JSON.parse(
-  readFileSync(join(ROOT, 'src/v2/circuit-artifacts.json'), 'utf8'),
-)
+export const CIRCUITS: Record<string, Artifact> = CIRCUIT_ARTIFACTS
 
 export type Circuit = keyof typeof CIRCUITS & string
 

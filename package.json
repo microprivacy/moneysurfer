@@ -10,13 +10,13 @@
   "type": "module",
   "packageManager": "pnpm@12.3.4+sha512.961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457",
   "bin": {
-    "moneysurfer": "./dist/src/cli.js"
+    "moneysurfer": "./dist/cli.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp src/v1/entrypoints.json dist/src/v1/ && cp src/v2/circuit-artifacts.json dist/src/v2/",
+    "build": "rslib build",
     "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
@@ -26,18 +26,17 @@
   "engines": {
     "node": ">=22.18"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.13",
     "@noble/ciphers": "^2.1.0",
     "@noble/curves": "~2.2.0",
     "@noble/hashes": "^2.4.0",
+    "@rslib/core": "^1.0.2",
     "@scure/bip32": "^2.4.0",
     "@scure/bip39": "^2.4.0",
-    "micro-eth-signer": "^0.20.1",
-    "micro-zk-proofs": "^0.3.1"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.5.13",
     "@types/node": "^26.5.1",
+    "micro-eth-signer": "^0.20.1",
+    "micro-zk-proofs": "^0.3.1",
     "typescript": "^7.0.2"
   }
 }

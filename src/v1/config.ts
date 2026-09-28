@@ -4,8 +4,8 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { ASSETS_ROOT, CHAINS, chainName, HOME_ROOT, ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
+import { ASSETS_ROOT, CHAINS, chainName, HOME_ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
+import ENTRYPOINTS from './entrypoints.json' with { type: 'json' }
 
 // The chain table, Safe service, wallet port and --rpc-url state are shared
 // with V2; they are re-exported so this protocol's modules keep importing
@@ -16,7 +16,6 @@ export {
   FRAME_RPC,
   LOG_CHUNK,
   parseChain,
-  ROOT,
   SAFE_TX_SERVICE,
   safePrefix,
   setRpcUrl,
@@ -93,7 +92,9 @@ export type Entrypoint = {
 
 /** chain id -> its Entrypoint and relayers. MONEYSURFER_ENTRYPOINTS points it elsewhere, e.g. a fork. */
 function registry(): Record<string, Omit<Entrypoint, 'chainId'>> {
-  return JSON.parse(readFileSync(process.env.MONEYSURFER_ENTRYPOINTS ?? join(ROOT, 'src/v1/entrypoints.json'), 'utf8'))
+  const file = process.env.MONEYSURFER_ENTRYPOINTS
+  // Imported, not read off disk: the bundle has no directory to read from.
+  return file ? JSON.parse(readFileSync(file, 'utf8')) : ENTRYPOINTS
 }
 
 export const registryChains = () => Object.keys(registry()).map(Number)
