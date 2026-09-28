@@ -250,7 +250,7 @@ async function balance(c: Common) {
   const { accounts } = recover(keys, root, owner, [...new Set(all.map((a) => a.tokenId))], ev)
   if (!accounts.length) return log(`no notes found for this seed at ${owner}`)
 
-  const asp = await aspSet(net)
+  const asp = await aspSet(net, log)
   const registered = (await read(net, KEYSTORE_ADDR, KEYSTORE.nullifyingKeys, owner)) !== 0n
   out(`${owner}${registered ? '' : '   NOT REGISTERED -- `moneysurfer v2 register` before spending'}`)
   const byToken = new Map<string, Account[]>()
@@ -689,7 +689,7 @@ async function withdraw(
     throw new UsageError(`account #${a.index + 1n} holds ${amountOf(asset, a.note.value)}`)
   }
 
-  const [state, ks, asp] = await Promise.all([stateTree(net, ev), keystoreTree(net, ev), aspSet(net)])
+  const [state, ks, asp] = await Promise.all([stateTree(net, ev), keystoreTree(net, ev), aspSet(net, log)])
   const timestamp = await read(net, POOL_ADDR, POOL.commitments, a.note.commitment)
   if (timestamp === 0n) throw new Error('the pool does not hold this note -- re-sync, or it was never mined')
   const note = {
@@ -823,7 +823,7 @@ async function trees() {
   out(`state tree     ${state.size} leaves, depth ${state.depth}, root ${hex32(state.root)}  (the pool knows it)`)
   const ks = await keystoreTree(net, ev)
   out(`keystore tree  ${ks.size} leaves, depth ${ks.depth}, root ${hex32(ks.root)}  (the keystore knows it)`)
-  const asp = await aspSet(net)
+  const asp = await aspSet(net, log)
   out(`association    ${asp.tree.size} leaves, root ${hex32(asp.root)}  (the registry published it)`)
 }
 

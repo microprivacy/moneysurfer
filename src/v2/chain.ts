@@ -27,6 +27,7 @@ import {
   DEPLOYED_BLOCK,
   ENTRYPOINT_ADDR,
   HOME,
+  IPFS_GATEWAYS,
   isNative,
   KEYSTORE_ADDR,
   LOG_CHUNK,
@@ -586,25 +587,71 @@ export function leafIndexOf(tree: LeanIMT, leaf: bigint): number {
 // ---------------------------------------------------------------------------
 export type AspSet = { root: bigint; tree: LeanIMT; source: string }
 
+/** The tree the registry's root stands for, if `leaves` are its labels -- as given, or sorted. */
+function matching(leaves: bigint[], root: bigint): LeanIMT | undefined {
+  const tree = new LeanIMT(leaves)
+  if (tree.root === root) return tree
+  const sorted = new LeanIMT([...leaves].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+  return sorted.root === root ? sorted : undefined
+}
+
+const aspCache = (root: bigint) => join(HOME, 'cache', `asp-${CHAIN_ID}-${root}.json`)
+
 /**
- * The association set whose root the registry has published. Both `chainId`
- * and `entrypoint` are required: the ASP serves several pools and answers for
- * the wrong one without them. The set is trusted only once it hashes to the
- * root the registry holds, so the gateway cannot lie about membership.
+ * The association set whose root the registry has published. The registry also
+ * publishes where it put a copy -- `latestIPFSCID()`, the same CID its
+ * ASPRootUpdated carries -- so a gateway can serve it and the ASP never learns
+ * that this address asked. Its own API is the last resort, and then it sees an
+ * IP and nothing else; V1 reads its set the same way.
+ *
+ * Whatever the source, the set counts only once it hashes to the root the
+ * registry holds, so no one serving it can lie about membership. `chainId` and
+ * `entrypoint` stay on the API request: the ASP serves several pools and
+ * answers for the wrong one without them.
  */
-export async function aspSet(net: RpcClient): Promise<AspSet> {
-  const root = await read(net, ASP_REGISTRY, ASP.latestASPRoot, undefined)
+export async function aspSet(net: RpcClient, log?: (s: string) => void): Promise<AspSet> {
+  const [root, cid] = await Promise.all([
+    read(net, ASP_REGISTRY, ASP.latestASPRoot, undefined),
+    read(net, ASP_REGISTRY, ASP.latestIPFSCID, undefined),
+  ])
+  const done = (tree: LeanIMT, source: string): AspSet => ({ root, tree, source })
+  const file = aspCache(root)
+  if (existsSync(file)) {
+    const tree = matching((JSON.parse(readFileSync(file, 'utf8')) as string[]).map(BigInt), root)
+    if (tree) return done(tree, 'cache')
+  }
+  const save = (tree: LeanIMT) => writeCache(file, JSON.stringify(tree.levels[0]!.map(String)))
+
+  for (const gw of IPFS_GATEWAYS) {
+    try {
+      const res = await fetch(`${gw}/ipfs/${cid}`, { signal: AbortSignal.timeout(60_000) })
+      if (!res.ok) continue
+      // The CID holds every level of the tree; level 0 is the set itself.
+      const levels = (await res.json()) as string[][]
+      const tree = matching(levels[0]!.map(BigInt), root)
+      if (!tree) {
+        log?.(`${gw} served ${cid}, but it does not hash to the ASP root -- ignored`)
+        continue
+      }
+      save(tree)
+      return done(tree, `IPFS ${cid} via ${gw}`)
+    } catch {
+      // next gateway
+    }
+  }
+  log?.(`no IPFS gateway served ${cid}; asking the ASP's API instead (it sees your IP, not your notes)`)
   const url = `${aspApi()}/association-set/leaves?chainId=${CHAIN_ID}&entrypoint=${ENTRYPOINT_ADDR}`
   const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`)
   const { leaves } = (await res.json()) as { leaves: string[] }
-  const tree = new LeanIMT(leaves.map(BigInt))
-  if (tree.root !== root)
+  const tree = matching(leaves.map(BigInt), root)
+  if (!tree)
     throw new Error(
-      `the ASP's ${tree.size} leaves hash to 0x${tree.root.toString(16)}, but the registry published ` +
-        `0x${root.toString(16)} -- the set is stale or is not this pool's`,
+      `the ASP's ${leaves.length} leaves do not hash to the root the registry published ` +
+        `(0x${root.toString(16)}) -- the set is stale or is not this pool's`,
     )
-  return { root, tree, source: url }
+  save(tree)
+  return done(tree, url)
 }
 
 /** Where a label sits in the association set. A note is unspendable until it is there. */
