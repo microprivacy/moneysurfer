@@ -14,14 +14,11 @@ jobs:
       - uses: actions/checkout@v6
       # Trusted publishing wants npm 11.5.1+; the runner's Node 22 ships npm 10.
       - run: npm i -g npm@latest
-      # jsr publish resolves bare specifiers from a hoisted node_modules.
       - name: Install dependencies
         run: |
           corepack enable
-          pnpm install --frozen-lockfile --config.node-linker=hoisted
-      - name: Publish to JSR
-        run: npx jsr publish
-      - name: Publish to npm
+          pnpm install --frozen-lockfile
+      - name: Publish package
         run: |
           pnpm build
           npm publish

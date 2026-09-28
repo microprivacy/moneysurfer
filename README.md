@@ -19,7 +19,7 @@ moneysurfer [v1|v2] <command> ...
 ## Install
 
 ```sh
-pnpm i jsr:@microprivacy/moneysurfer
+pnpm i -g moneysurfer
 ```
 
 Then fetch the circuits and make a seed:
