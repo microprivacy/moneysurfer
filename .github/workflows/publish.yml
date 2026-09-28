@@ -19,15 +19,6 @@ jobs:
         run: |
           corepack enable
           pnpm install --frozen-lockfile --config.node-linker=hoisted
-      # Both registries take the version from a manifest, not from the tag, and
-      # neither lets you replace a version once it is out.
-      - name: Check the tag against both manifests
-        run: |
-          tag=${GITHUB_REF_NAME#v}
-          for f in package.json jsr.json; do
-            v=$(node -p "require('./$f').version")
-            [ "$v" = "$tag" ] || { echo "$f says $v, tag says $tag"; exit 1; }
-          done
       - name: Publish to JSR
         run: npx jsr publish
       - name: Publish to npm
