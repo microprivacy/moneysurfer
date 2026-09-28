@@ -1,6 +1,6 @@
 {
   "name": "moneysurfer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Lightweight CLI for Privacy Pools V1 and V2",
   "license": "MPL-2.0",
   "repository": {
