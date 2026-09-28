@@ -10,9 +10,7 @@ moneysurfer [v1|v2] <command> ...
 
 - Full V1 and V2 support: V1 on Ethereum, Optimism and Arbitrum; V2 on mainnet
 - One seed per protocol
-- The ASP is not uploaded to, and not asked either: both protocols take the association set
-  from IPFS and keep it only if it hashes to the root on chain, falling back to the ASP's API
-  when no gateway serves it. The opening it needs is sealed to its key inside the deposit
+- Nothing is sent to the ASP; its set is read off the chain
 - Withdraw via a relayer (V1), yourself, or a Safe; ragequit if unapproved
 - Local prover in pure JS, everything simulated before sending
 - Sign with Frame, a private key or a keystore
