@@ -708,6 +708,22 @@ async function withdraw(
   // The signer submits, so it is the processooor; no relayer, so no fee.
   const signer = await signerFor(net, c, owner)
   const processor = c.safe ?? signer.address
+  // **The pool pays the processooor, and nobody else.** `routing.recipient` is
+  // read by the distributor contract a relayer submits through -- it is that
+  // contract which splits the payout and takes its fee -- and the PoolVault
+  // itself hands `amountOut` straight to msg.sender, which it requires to be
+  // the processooor the proof names. Replaying a mined transact from any other
+  // sender reverts, so there is no arrangement where this pays someone else.
+  // Withdrawing 0.004 ETH to a third party paid the submitter instead before
+  // this was checked: 0x7ef8c18d5dcf5148f0725e588aa96f4658959432cee33826f3205e5309690b60.
+  if (recipient.toLowerCase() !== processor.toLowerCase()) {
+    throw new UsageError(
+      `a spend pays whoever submits it -- ${processor} -- and the pool will not pay ${recipient}:\n` +
+        '  it hands the amount to msg.sender and requires that to be the processooor the proof names.\n' +
+        `  Name ${processor} as the recipient and forward it from there, or wait for relayed\n` +
+        "  withdrawals, where a relayer's contract is the processooor and splits the payout.",
+    )
+  }
   const routing = { recipient, feeRecipient: recipient, feeAmount: 0n, nativeGas: 0n }
   const data = payoutRouting(routing)
   const notes = [NO_NOTE]
@@ -842,6 +858,7 @@ export const HELP: string = `moneysurfer v2 -- Privacy Pools V2 from the command
   v2 withdraw <asset> <amount|all> <to>   spend privately: a transact with one unshielded output
        --id N                        from account #N (default: the first that can)
        --self | --safe SAFE          submit and pay gas yourself, or have a Safe submit it
+                                     <to> has to be the submitter: the pool pays msg.sender
   v2 ragequit <asset> --id N         take a note back publicly, to the owning address
   v2 status | trees                  the deployment, and both trees rebuilt from logs
 
