@@ -12,15 +12,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
-      # Trusted publishing wants npm 11.5.1+; the runner's Node 22 ships npm 10.
-      - run: npm i -g npm@latest
       - name: Install dependencies
         run: |
           corepack enable
           pnpm install --frozen-lockfile
-      # Staged, not published: the trust relationship allows `npm stage publish`
-      # only, and a maintainer approves the version with 2FA afterwards.
+      # Staged, not published: the trust relationship allows staging only, and a
+      # maintainer approves the version with 2FA afterwards. prepublishOnly builds
+      # dist/; a tag checkout is a detached HEAD, which the branch check refuses.
       - name: Stage package
-        run: |
-          pnpm build
-          npm stage publish
+        run: pnpm stage publish --no-git-checks
