@@ -4,7 +4,7 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import { join } from 'node:path'
-import { ASSETS_ROOT, HOME_ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
+import { ASSETS_ROOT, CHAINS, HOME_ROOT, rpcOverrideUrl, UsageError } from '../shared/config.ts'
 import CIRCUIT_ARTIFACTS from './circuit-artifacts.json' with { type: 'json' }
 
 // Chains, the Safe service, the wallet port and --rpc-url are shared with V1.
@@ -141,7 +141,7 @@ export const STATE_DEPTH = 22
 export const KEYSTORE_DEPTH = 18
 export const ASP_DEPTH = 18
 
-export const DEFAULT_RPC = process.env.MONEYSURFER_RPC ?? 'https://ethereum-rpc.publicnode.com'
+export const DEFAULT_RPC = process.env.MONEYSURFER_RPC ?? CHAINS[CHAIN_ID]!.rpc
 
 /** --rpc-url if given, else the public default. */
 export const rpcUrl = () => rpcOverrideUrl() ?? DEFAULT_RPC
