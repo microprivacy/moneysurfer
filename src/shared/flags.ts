@@ -29,6 +29,7 @@ export const OPTIONS = {
   account: { type: 'string' },
   keystore: { type: 'string' },
   from: { type: 'string' },
+  owner: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -49,14 +50,17 @@ export type Flags = {
   account?: string
   keystore?: string
   from?: string
+  owner?: string
   help?: boolean
 }
 
 /** The flags every command shares, resolved and checked once. */
 export type Common = {
   threads: number
-  /** propose to this Safe instead of sending; it is also the depositor and the owner */
+  /** propose to this Safe instead of sending; it is also the depositor and the owner, unless V2's --owner says otherwise */
   safe?: string
+  /** V2's withdraw: whose notes the Safe spends */
+  owner?: string
   sig: SignerOpts
   /** undefined when not given: each protocol has its own default */
   maxFeePercent?: number

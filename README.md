@@ -49,6 +49,8 @@ A deposit can be withdrawn once the ASP approves it (up to 7 days); until then
 A withdrawal goes through 0xbow's relayer, which pays the gas and takes its fee out of
 `<amount>`. With `--self` or `--safe` you submit it instead, and then `<to>` has to be the
 submitter: the pool pays `msg.sender`, and only a relayer's contract splits the payout.
+`--safe` also spends the Safe's own notes; add `--owner ADDR` to have it submit a withdrawal of
+ADDR's notes instead, proposed by any owner or delegate.
 
 ```sh
 moneysurfer v2 setup
