@@ -67,7 +67,7 @@ ${SHARED}`
  * is deployed on, so `v2 --chain optimism` is refused there, by name.
  */
 const REJECTS: Record<'v1' | 'v2', { flag: keyof Flags; why: string }[]> = {
-  v1: [],
+  v1: [{ flag: 'owner', why: 'a V1 note has no owner address; the seed alone spends it' }],
   v2: [],
 }
 

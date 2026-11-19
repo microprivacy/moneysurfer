@@ -173,11 +173,16 @@ async function init(o: { import?: boolean; fromWallet?: boolean; sig: Common['si
 /**
  * The account a command acts as: the keys from the seed, and the address they
  * are registered against. V2 binds a note to an owner address, so `--safe` and
- * `--from` change *which* notes are yours, not merely who signs.
+ * `--from` change *which* notes are yours, not merely who signs. `withdraw`
+ * takes `--owner` to spend another address's notes through a Safe.
  */
-async function account(net: RpcClient, c: Common): Promise<{ keys: Keys; root: Uint8Array; owner: string }> {
+async function account(
+  net: RpcClient,
+  c: Common,
+  as?: string,
+): Promise<{ keys: Keys; root: Uint8Array; owner: string }> {
   const root = rootSecret()
-  const owner = c.safe ?? c.sig.from ?? (await makeSigner(net, chainId(), c.sig)).address
+  const owner = as ?? c.safe ?? c.sig.from ?? (await makeSigner(net, chainId(), c.sig)).address
   return { keys: deriveKeys(root), root, owner: checksummed(owner) }
 }
 
@@ -623,7 +628,8 @@ async function spendNonce(net: RpcClient, safe: string, a: Account, privateNulli
 /**
  * Sign a SafeTx and hand it to the Safe's owners. The Safe is then the
  * depositor and the owner of every note -- V1's rule, and in V2 it also means
- * the Keystore registration has to be the Safe's.
+ * the Keystore registration has to be the Safe's. A withdrawal with `--owner`
+ * is the exception: the notes are that address's, and the Safe only submits.
  */
 async function proposeCalls(net: RpcClient, c: Common, calls: SafeCall[], what: string, at?: bigint) {
   const safe = c.safe!
@@ -717,13 +723,18 @@ async function withdraw(
   if ([v.relayer, v.self, c.safe].filter(Boolean).length > 1) {
     throw new UsageError('--relayer, --self and --safe are exclusive')
   }
+  if (v.owner !== undefined && !c.safe)
+    throw new UsageError('--owner needs --safe: it names whose notes the Safe spends')
   // As in V1, a relayer submits unless --self or --safe says otherwise.
   const relayed = !(v.self || c.safe)
   const recipient = checksummed(to)
   const net = await connect()
   const all = await readAssets(net)
   const asset = pickAsset(all, key)
-  const { keys, root, owner } = await account(net, c)
+  // The proof shows the owner's keys and Keystore leaf, never msg.sender, so a
+  // Safe can submit a spend of notes another address owns: the pool only
+  // requires the sender to be the processooor the proof names.
+  const { keys, root, owner } = await account(net, c, v.owner === undefined ? undefined : checksummed(v.owner))
   if ((await read(net, KEYSTORE_ADDR, KEYSTORE.nullifyingKeys, owner)) === 0n) {
     throw new UsageError(`${owner} is not in the Keystore -- run \`moneysurfer v2 register\` first`)
   }
@@ -1002,6 +1013,7 @@ export const HELP: string = `moneysurfer v2 -- Privacy Pools V2 from the command
        --relayer URL                 use this relayer instead of 0xbow's
        --self | --safe SAFE          submit and pay gas yourself, or have a Safe submit it
                                      <to> has to be the submitter then: the pool pays msg.sender
+       --owner ADDR                  with --safe: spend ADDR's notes, not the Safe's
   v2 ragequit <asset> --id N         take a note back publicly, to the owning address
   v2 status | trees                  the deployment, and both trees rebuilt from logs
 
@@ -1052,5 +1064,6 @@ export async function run(cmd: string, rest: string[], v: Flags, c: Common): Pro
     trees: () => trees(),
   }
   if (!Object.hasOwn(commands, cmd)) throw new UsageError(`unknown v2 command '${cmd}'\n\n${HELP}`)
+  if (v.owner !== undefined && cmd !== 'withdraw') throw new UsageError('only withdraw takes --owner')
   await commands[cmd]!()
 }
