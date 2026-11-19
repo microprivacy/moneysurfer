@@ -723,8 +723,7 @@ async function withdraw(
   if ([v.relayer, v.self, c.safe].filter(Boolean).length > 1) {
     throw new UsageError('--relayer, --self and --safe are exclusive')
   }
-  if (v.owner !== undefined && !c.safe)
-    throw new UsageError('--owner needs --safe: it names whose notes the Safe spends')
+  if (c.owner && !c.safe) throw new UsageError('--owner needs --safe: it names whose notes the Safe spends')
   // As in V1, a relayer submits unless --self or --safe says otherwise.
   const relayed = !(v.self || c.safe)
   const recipient = checksummed(to)
@@ -734,7 +733,7 @@ async function withdraw(
   // The proof shows the owner's keys and Keystore leaf, never msg.sender, so a
   // Safe can submit a spend of notes another address owns: the pool only
   // requires the sender to be the processooor the proof names.
-  const { keys, root, owner } = await account(net, c, v.owner === undefined ? undefined : checksummed(v.owner))
+  const { keys, root, owner } = await account(net, c, c.owner)
   if ((await read(net, KEYSTORE_ADDR, KEYSTORE.nullifyingKeys, owner)) === 0n) {
     throw new UsageError(`${owner} is not in the Keystore -- run \`moneysurfer v2 register\` first`)
   }
@@ -1064,6 +1063,6 @@ export async function run(cmd: string, rest: string[], v: Flags, c: Common): Pro
     trees: () => trees(),
   }
   if (!Object.hasOwn(commands, cmd)) throw new UsageError(`unknown v2 command '${cmd}'\n\n${HELP}`)
-  if (v.owner !== undefined && cmd !== 'withdraw') throw new UsageError('only withdraw takes --owner')
+  if (c.owner && cmd !== 'withdraw') throw new UsageError('only withdraw takes --owner')
   await commands[cmd]!()
 }

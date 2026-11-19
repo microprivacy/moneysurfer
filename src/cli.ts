@@ -105,6 +105,7 @@ try {
   const common: Common = {
     threads,
     safe: v.safe === undefined ? undefined : checksummed(v.safe),
+    owner: v.owner === undefined ? undefined : checksummed(v.owner),
     maxFeePercent,
     dryRun: v['dry-run'] ?? false,
     sig: {

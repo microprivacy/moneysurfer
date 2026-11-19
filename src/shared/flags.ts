@@ -59,6 +59,8 @@ export type Common = {
   threads: number
   /** propose to this Safe instead of sending; it is also the depositor and the owner, unless V2's --owner says otherwise */
   safe?: string
+  /** V2's withdraw: whose notes the Safe spends */
+  owner?: string
   sig: SignerOpts
   /** undefined when not given: each protocol has its own default */
   maxFeePercent?: number
