@@ -52,15 +52,20 @@ import {
   ASP_PUBLIC_KEY,
   ASP_REGISTRY,
   ASSETS,
-  CHAIN_ID,
   CIRCUITS,
+  chainId,
+  chainName,
   DEPOSIT_VERIFIER,
   ENTRYPOINT_ADDR,
   HOME,
   isNative,
   KEYSTORE_ADDR,
   POOL_ADDR,
+  parseChain,
+  RELAY_ADDR,
+  RELAYERS,
   rpcUrl,
+  setChain,
   transactCircuit,
   UsageError,
 } from './config.ts'
@@ -85,7 +90,8 @@ import {
 } from './crypto.ts'
 import { buildDeposit, NO_NOTE, queuedDeposits } from './deposit.ts'
 import { ragequit as ragequitWitness, transact as transactWitness } from './notes.ts'
-import { prove, solidityProof } from './prover.ts'
+import { type Proof, prove, solidityProof } from './prover.ts'
+import { type Details, type Quote, quoteGross, RELAY, relay, details as relayerDetails } from './relayer.ts'
 import { assertRouter, explainRouterRevert, HEADROOM_PPM, quote, ROUTER, sharesFor } from './zap.ts'
 
 const log = (s: string) => process.stderr.write(`${s}\n`)
@@ -101,7 +107,7 @@ const spendOf = (a: Asset, v: bigint) => `${formatUnits(v, units(a).decimals)} $
 
 async function connect(): Promise<RpcClient> {
   const net = rpc(rpcUrl())
-  await assertChain(net, CHAIN_ID)
+  await assertChain(net, chainId())
   return net
 }
 
@@ -148,13 +154,13 @@ async function init(o: { import?: boolean; fromWallet?: boolean; sig: Common['si
   if (o.fromWallet) {
     // "Sign in with wallet": the root secret is HKDF of the signature's r, so
     // the signature must be deterministic -- ask for it twice and compare.
-    const signer = await makeSigner(await connect(), CHAIN_ID, o.sig)
+    const signer = await makeSigner(await connect(), chainId(), o.sig)
     log(`asking ${signer.address} to sign the secret-derivation message, twice ...`)
     const typed = secretDerivationTypedData(signer.address)
     const [a, b] = [await signer.signTyped(typed), await signer.signTyped(typed)]
     if (a !== b) throw new Error('the wallet signed the same message differently twice; it cannot derive a stable seed')
     saveMnemonic(entropyToMnemonic(rootSecretFromSignature(a, signer.address), wordlist))
-    log(`these words carry the root secret v2.privacypools.com derives for ${signer.address}`)
+    log(`these words carry the root secret privacypools.com derives for ${signer.address}`)
     log('  UNVERIFIED: the derivation was recovered from the app bundle and has never been checked')
     log('  against an account the app itself made. Confirm `register` before funding anything.')
     return
@@ -171,7 +177,7 @@ async function init(o: { import?: boolean; fromWallet?: boolean; sig: Common['si
  */
 async function account(net: RpcClient, c: Common): Promise<{ keys: Keys; root: Uint8Array; owner: string }> {
   const root = rootSecret()
-  const owner = c.safe ?? c.sig.from ?? (await makeSigner(net, CHAIN_ID, c.sig)).address
+  const owner = c.safe ?? c.sig.from ?? (await makeSigner(net, chainId(), c.sig)).address
   return { keys: deriveKeys(root), root, owner: checksummed(owner) }
 }
 
@@ -184,7 +190,7 @@ async function account(net: RpcClient, c: Common): Promise<{ keys: Keys; root: U
 const signerFor = (net: RpcClient, c: Common, owner: string) =>
   c.dryRun
     ? Promise.resolve({ address: owner, send: () => Promise.reject(new Error('dry run')) } as unknown as Signer)
-    : makeSigner(net, CHAIN_ID, c.sig)
+    : makeSigner(net, chainId(), c.sig)
 
 // ---------------------------------------------------------------------------
 // setup
@@ -247,7 +253,7 @@ async function balance(c: Common) {
   const { keys, root, owner } = await account(net, c)
   const all = await readAssets(net)
   const ev = await sync(net, log)
-  const { accounts } = recover(keys, root, owner, [...new Set(all.map((a) => a.tokenId))], ev)
+  const { accounts } = recover(keys, root, owner, [...new Set(all.map((a) => a.tokenId))], ev, chainId())
   if (!accounts.length) return log(`no notes found for this seed at ${owner}`)
 
   const asp = await aspSet(net, log)
@@ -418,12 +424,12 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
   // deposit waiting in the Safe's queue has claimed -- whatever its value, or
   // two deposits would share secrets and `recover` would find only one.
   const ev = await sync(net)
-  const { nextIndex } = recover(keys, root, owner, [asset.tokenId], ev)
-  const queue = c.safe ? await safeQueue(net, CHAIN_ID, c.safe) : undefined
+  const { nextIndex } = recover(keys, root, owner, [asset.tokenId], ev, chainId())
+  const queue = c.safe ? await safeQueue(net, chainId(), c.safe) : undefined
   const waiting = queue ? queuedDeposits(queue, asset.tokenId) : []
   let index = nextIndex.get(asset.tokenId.toLowerCase()) ?? 0n
   for (;;) {
-    const s = depositSecrets(root, asset.tokenId, index)
+    const s = depositSecrets(root, asset.tokenId, index, chainId())
     const claimed = waiting.some((w) => commitmentAt(asset.tokenId, owner, s, w.value) === w.commitment)
     if (!claimed && (await read(net, POOL_ADDR, POOL.commitments, commitmentAt(asset.tokenId, owner, s, value))) === 0n)
       break
@@ -438,7 +444,7 @@ async function deposit(key: string | undefined, amountArg: string | undefined, c
     log(`  it costs ${amountOf(asset, value + fee)}: the ${Number(asset.vettingFeeBPS) / 100}% vetting fee is on top`)
   log(`  account #${index + 1n}`)
 
-  const secrets = depositSecrets(root, asset.tokenId, index)
+  const secrets = depositSecrets(root, asset.tokenId, index, chainId())
   const started = Date.now()
   log(`proving on ${c.threads} threads ...`)
   const dep = await buildDeposit({
@@ -602,7 +608,7 @@ async function simulate(
  * cannot both execute, so say so rather than quietly take the other's nonce.
  */
 async function spendNonce(net: RpcClient, safe: string, a: Account, privateNullifyingKey: bigint): Promise<bigint> {
-  const q = await safeQueue(net, CHAIN_ID, safe)
+  const q = await safeQueue(net, chainId(), safe)
   const same = queuedWith(q, nullifierOf(privateNullifyingKey, a.note.commitment))
   if (same) {
     log(
@@ -621,18 +627,18 @@ async function proposeCalls(net: RpcClient, c: Common, calls: SafeCall[], what: 
   const safe = c.safe!
   // After everything already waiting, unless the caller placed it: a proposal
   // queued behind one that has not executed yet would only revert.
-  const nonce = at ?? nextNonce(await safeQueue(net, CHAIN_ID, safe))
+  const nonce = at ?? nextNonce(await safeQueue(net, chainId(), safe))
   const call = calls.length > 1 ? batch(calls) : calls[0]!
   // prepareSafeTx simulates the call as the Safe would run it, so a dry run
   // still proves the batch executes -- it just never asks anyone to sign.
   if (c.dryRun) {
-    const { safeTxHash } = await prepareSafeTx(net, CHAIN_ID, safe, call, nonce)
+    const { safeTxHash } = await prepareSafeTx(net, chainId(), safe, call, nonce)
     out(JSON.stringify({ safe, safeTxHash, to: call.to, value: String(call.value), data: hex(call.data) }, null, 2))
     return
   }
-  const signer = await makeSigner(net, CHAIN_ID, c.sig)
+  const signer = await makeSigner(net, chainId(), c.sig)
   log(`proposing ${what} to Safe ${safe} as ${signer.address}${calls.length > 1 ? ', batched with the approval' : ''}`)
-  const { safeTxHash, queue } = await proposeSafeTx({ net, chainId: CHAIN_ID, safe, signer, call, nonce })
+  const { safeTxHash, queue } = await proposeSafeTx({ net, chainId: chainId(), safe, signer, call, nonce })
   log(`proposed ${safeTxHash} at nonce ${nonce}; the owners confirm and execute it at ${queue}`)
 }
 
@@ -651,6 +657,53 @@ function pickNote(accounts: Account[], amount: bigint | 'all', id?: string): Acc
   return a
 }
 
+type Relayed = { base: string; details: Details; quote: Quote }
+
+/** Why a quote is too dear, if it is: above the asset's own cap, or above --max-fee-percent of `gross`. */
+function tooDear(asset: Asset, q: Quote, gross: bigint, maxPercent: number): string | undefined {
+  const asks = `asks ${amountOf(asset, q.feeAmount)} (${Number((q.feeAmount * 1_000_000n) / gross) / 10_000}%)`
+  if (asset.maxRelayFee > 0n && q.feeAmount > asset.maxRelayFee)
+    return `${asks}, above the pool's cap of ${amountOf(asset, asset.maxRelayFee)}`
+  if (q.feeAmount * 1_000_000n > gross * BigInt(Math.round(maxPercent * 10_000)))
+    return `${asks}, above --max-fee-percent ${maxPercent}`
+}
+
+/**
+ * The first relayer that serves this chain and asset and quotes `gross`
+ * within both the asset's `maxRelayFee` and --max-fee-percent -- V1's rule,
+ * against V2's API.
+ */
+async function pickRelayer(
+  urls: string[],
+  asset: Asset,
+  recipient: string,
+  gross: bigint,
+  maxPercent: number,
+): Promise<Relayed> {
+  const refused: string[] = []
+  for (const url of urls) {
+    const base = url.replace(/\/$/, '')
+    try {
+      const d = await relayerDetails(base)
+      if (!d.assets.has(asset.tokenId.toLowerCase())) {
+        refused.push(`${base}: does not relay ${asset.symbol} on ${chainName(chainId())}`)
+        continue
+      }
+      const q = await quoteGross(base, asset.tokenId, recipient, gross)
+      const why = tooDear(asset, q, gross, maxPercent)
+      if (!why) return { base, details: d, quote: q }
+      refused.push(`${base}: ${why}`)
+    } catch (e) {
+      refused.push(`${base}: ${(e as Error).message}`)
+    }
+  }
+  throw new UsageError(
+    `no relayer takes this withdrawal:\n  ${refused.join('\n  ')}\n  raise --max-fee-percent, name one with --relayer, or pay the gas with --self`,
+  )
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 async function withdraw(
   key: string | undefined,
   amountArg: string | undefined,
@@ -662,16 +715,8 @@ async function withdraw(
   if ([v.relayer, v.self, c.safe].filter(Boolean).length > 1) {
     throw new UsageError('--relayer, --self and --safe are exclusive')
   }
-  if (v.relayer || !(v.self || c.safe)) {
-    // V1 goes through a relayer by default. V2's relayer protocol is only
-    // partly recovered -- /v1/details and /v1/quote are known, the submit body
-    // is not -- so this client does not pretend to speak it. See FINDINGS.md.
-    throw new UsageError(
-      "a relayed withdrawal is not implemented: V2's relayer submit protocol is not fully recovered.\n" +
-        '  Pass --self to submit and pay gas yourself (this links that address to the withdrawal),\n' +
-        '  or --safe SAFE to have a Safe submit it.',
-    )
-  }
+  // As in V1, a relayer submits unless --self or --safe says otherwise.
+  const relayed = !(v.self || c.safe)
   const recipient = checksummed(to)
   const net = await connect()
   const all = await readAssets(net)
@@ -680,8 +725,30 @@ async function withdraw(
   if ((await read(net, KEYSTORE_ADDR, KEYSTORE.nullifyingKeys, owner)) === 0n) {
     throw new UsageError(`${owner} is not in the Keystore -- run \`moneysurfer v2 register\` first`)
   }
+  // Submitting yourself, the signer is the processooor and is resolved before
+  // the sync and the proof, so a missing wallet fails in a second. A relayer's
+  // PrivacyPoolRelay is the processooor otherwise, and nobody here signs.
+  const signer = relayed ? undefined : await signerFor(net, c, owner)
+  const processor = relayed ? RELAY_ADDR : (c.safe ?? signer!.address)
+  // **The pool pays the processooor, and nobody else.** `routing.recipient` is
+  // read by the PrivacyPoolRelay a relayer submits through -- it is that
+  // contract which splits the payout and takes its fee -- and the PoolVault
+  // itself hands `amountOut` straight to msg.sender, which it requires to be
+  // the processooor the proof names. Replaying a mined transact from any other
+  // sender reverts, so submitting yourself there is no arrangement where this
+  // pays someone else. Withdrawing 0.004 ETH to a third party paid the
+  // submitter instead before this was checked:
+  // 0x7ef8c18d5dcf5148f0725e588aa96f4658959432cee33826f3205e5309690b60.
+  if (!relayed && recipient.toLowerCase() !== processor.toLowerCase()) {
+    throw new UsageError(
+      `a spend pays whoever submits it -- ${processor} -- and the pool will not pay ${recipient}:\n` +
+        '  it hands the amount to msg.sender and requires that to be the processooor the proof names.\n' +
+        `  Name ${processor} as the recipient, or leave out ${c.safe ? '--safe' : '--self'} and let a relayer\n` +
+        '  submit it: its PrivacyPoolRelay is then the processooor and pays the recipient.',
+    )
+  }
   const ev = await sync(net, log)
-  const { accounts } = recover(keys, root, owner, [asset.tokenId], ev)
+  const { accounts } = recover(keys, root, owner, [asset.tokenId], ev, chainId())
   const amount = amountArg === 'all' ? 'all' : parseUnits(amountArg, asset.decimals)
   const a = pickNote(accounts, amount, v.id)
   const value = amount === 'all' ? a.note.value : amount
@@ -705,65 +772,117 @@ async function withdraw(
   leafIndexOf(state, commitmentLeaf(a.note.commitment, timestamp))
   aspIndexOf(asp, a.label)
 
-  // The signer submits, so it is the processooor; no relayer, so no fee.
-  const signer = await signerFor(net, c, owner)
-  const processor = c.safe ?? signer.address
-  // **The pool pays the processooor, and nobody else.** `routing.recipient` is
-  // read by the distributor contract a relayer submits through -- it is that
-  // contract which splits the payout and takes its fee -- and the PoolVault
-  // itself hands `amountOut` straight to msg.sender, which it requires to be
-  // the processooor the proof names. Replaying a mined transact from any other
-  // sender reverts, so there is no arrangement where this pays someone else.
-  // Withdrawing 0.004 ETH to a third party paid the submitter instead before
-  // this was checked: 0x7ef8c18d5dcf5148f0725e588aa96f4658959432cee33826f3205e5309690b60.
-  if (recipient.toLowerCase() !== processor.toLowerCase()) {
-    throw new UsageError(
-      `a spend pays whoever submits it -- ${processor} -- and the pool will not pay ${recipient}:\n` +
-        '  it hands the amount to msg.sender and requires that to be the processooor the proof names.\n' +
-        `  Name ${processor} as the recipient and forward it from there, or wait for relayed\n` +
-        "  withdrawals, where a relayer's contract is the processooor and splits the payout.",
-    )
-  }
-  const routing = { recipient, feeRecipient: recipient, feeAmount: 0n, nativeGas: 0n }
-  const data = payoutRouting(routing)
   const notes = [NO_NOTE]
-  const context = transactContext(processor, data, notes)
-
   // One input, one output: the change. Its value is settled by the event, which
   // is what lets `balance` follow the lineage afterwards without decrypting
   // anything.
-  const change = a.note.value - value
-  const outputs = [
-    { owner, noteSecret: changeSecret(root, a.label, BigInt(a.spends.length)), value: change, label: a.label },
-  ]
-  log(`withdrawing ${amountOf(asset, value)} from account #${a.index + 1n} to ${recipient}`)
-  if (change > 0n) log(`  ${amountOf(asset, change)} stays in the pool as a new note`)
-  log(`proving ${transactCircuit(1, 1)} on ${c.threads} threads ...`)
-  const t = transactWitness(
-    { owner, privateNullifyingKey: keys.privateNullifyingKey, privateRevocableKey: keys.privateRevocableKey },
-    [note],
-    outputs,
-    { state, keystore: ks, asp: asp.tree },
-    { amountOut: value, context },
-  )
-  const proof = await prove(t.circuit, t.input, c.threads)
-  const s = solidityProof(proof)
-  const calldata = POOL.transact.encodeInput({
-    proof: { pA: s.pA, pB: s.pB, pC: s.pC, pubSignals: groupTransact(proof.publicSignals, 1, 1) },
-    transactParams: { processooor: processor, data },
-    notes: notes.map((n) => ({ hint: hexToBytes(n.hint.slice(2)), ciphertext: n.ciphertext })),
-  })
-  const call = { to: POOL_ADDR, value: 0n, data: calldata }
-  if (c.safe)
-    return proposeCalls(net, c, [call], 'the withdrawal', await spendNonce(net, c.safe, a, keys.privateNullifyingKey))
-  await simulate(net, signer.address, call, asset)
-  log('simulated: the pool accepts it')
-  if (c.dryRun) {
-    out(JSON.stringify({ to: call.to, data: hex(calldata), recipient, amountOut: String(value) }, null, 2))
+  const proveSpend = (amountOut: bigint, data: Uint8Array): Promise<Proof> => {
+    const outputs = [
+      {
+        owner,
+        noteSecret: changeSecret(root, a.label, BigInt(a.spends.length)),
+        value: a.note.value - amountOut,
+        label: a.label,
+      },
+    ]
+    log(`proving ${transactCircuit(1, 1)} on ${c.threads} threads ...`)
+    const t = transactWitness(
+      { owner, privateNullifyingKey: keys.privateNullifyingKey, privateRevocableKey: keys.privateRevocableKey },
+      [note],
+      outputs,
+      { state, keystore: ks, asp: asp.tree },
+      { amountOut, context: transactContext(processor, data, notes) },
+    )
+    return prove(t.circuit, t.input, c.threads)
+  }
+  const transactArgs = (proof: Proof, data: Uint8Array) => {
+    const s = solidityProof(proof)
+    return {
+      proof: { pA: s.pA, pB: s.pB, pC: s.pC, pubSignals: groupTransact(proof.publicSignals, 1, 1) },
+      transactParams: { processooor: processor, data },
+      notes: notes.map((n) => ({ hint: hexToBytes(n.hint.slice(2)), ciphertext: n.ciphertext })),
+    }
+  }
+
+  if (!relayed) {
+    // No relayer, so no fee.
+    const data = payoutRouting({ recipient, feeRecipient: recipient, feeAmount: 0n, nativeGas: 0n })
+    log(`withdrawing ${amountOf(asset, value)} from account #${a.index + 1n} to ${recipient}`)
+    if (a.note.value > value) log(`  ${amountOf(asset, a.note.value - value)} stays in the pool as a new note`)
+    const proof = await proveSpend(value, data)
+    const calldata = POOL.transact.encodeInput(transactArgs(proof, data))
+    const call = { to: POOL_ADDR, value: 0n, data: calldata }
+    if (c.safe)
+      return proposeCalls(net, c, [call], 'the withdrawal', await spendNonce(net, c.safe, a, keys.privateNullifyingKey))
+    await simulate(net, signer!.address, call, asset)
+    log('simulated: the pool accepts it')
+    if (c.dryRun) {
+      out(JSON.stringify({ to: call.to, data: hex(calldata), recipient, amountOut: String(value) }, null, 2))
+      return
+    }
+    log(`submitting from ${signer!.address} -- this links that address to the withdrawal`)
+    log(`sent: ${await signer!.send(call)}`)
     return
   }
-  log(`submitting from ${signer.address} -- this links that address to the withdrawal`)
-  log(`sent: ${await signer.send(call)}`)
+
+  const maxPercent = c.maxFeePercent ?? 1
+  let r = await pickRelayer(v.relayer ? [v.relayer] : RELAYERS, asset, recipient, value, maxPercent)
+  log(`relayer ${r.base}: fee ${amountOf(asset, r.quote.feeAmount)} to ${r.quote.routing.feeRecipient}`)
+  log(
+    `withdrawing ${amountOf(asset, r.quote.amountSent)} from account #${a.index + 1n}: ${amountOf(asset, r.quote.amount)} to ${recipient}`,
+  )
+  if (a.note.value > r.quote.amountSent)
+    log(`  ${amountOf(asset, a.note.value - r.quote.amountSent)} stays in the pool as a new note`)
+  // A quote lives about a minute, and a slow machine can outlast it proving.
+  // The proof binds the routing, not the relayer's signature over it, so a
+  // fresh quote for the same fee keeps the same proof.
+  let proof = await proveSpend(r.quote.amountSent, r.quote.data)
+  for (let tries = 0; Date.now() > r.quote.expiration - 5_000; tries++) {
+    if (tries === 3)
+      throw new Error("the relayer's quote keeps expiring before the proof is ready -- try more --threads")
+    log('the quote expired while proving; asking again')
+    const q = await quoteGross(r.base, asset.tokenId, recipient, value)
+    const why = tooDear(asset, q, value, maxPercent)
+    if (why) throw new UsageError(`the relayer now ${why}`)
+    const same = q.amountSent === r.quote.amountSent && bytesToHex(q.data) === bytesToHex(r.quote.data)
+    r = { ...r, quote: q }
+    if (!same) {
+      log(`  the fee moved to ${amountOf(asset, q.feeAmount)}`)
+      proof = await proveSpend(q.amountSent, q.data)
+    }
+  }
+
+  // The whole relay, simulated as the relayer would send it: roots, context,
+  // nullifier and the fee split -- before it is handed over.
+  const calldata = RELAY.relay.encodeInput(transactArgs(proof, r.quote.data))
+  const sim = await net.dryRun({ from: r.details.relayerAddress, to: RELAY_ADDR, data: hex(calldata) })
+  if (!sim.success) throw new UsageError(`it would revert, nothing was sent: ${sim.reason}`)
+  log('simulated: the relay accepts it')
+  if (c.dryRun) {
+    out(
+      JSON.stringify(
+        {
+          relayer: r.base,
+          to: RELAY_ADDR,
+          data: hex(calldata),
+          recipient,
+          amountOut: String(r.quote.amountSent),
+          fee: String(r.quote.feeAmount),
+        },
+        null,
+        2,
+      ),
+    )
+    return
+  }
+  const spent = nullifierOf(keys.privateNullifyingKey, a.note.commitment)
+  const tx = await relay(r.base, { quote: r.quote, proof, notes, inputs: 1 })
+  log(`relayer sent ${tx} -- waiting for the chain`)
+  // The chain, not the relayer, says when it is done.
+  for (const deadline = Date.now() + 15 * 60_000; Date.now() < deadline; await sleep(4000)) {
+    if ((await read(net, POOL_ADDR, POOL.spentNullifiers, spent)) !== 0n) return log(`withdrawn: ${tx}`)
+  }
+  throw new Error('not confirmed within 15 minutes -- check `moneysurfer v2 balance` before trying again')
 }
 
 /**
@@ -786,7 +905,7 @@ async function ragequit(key: string | undefined, v: Flags, c: Common) {
   const asset = pickAsset(all, key)
   const { keys, root, owner } = await account(net, c)
   const ev = await sync(net, log)
-  const { accounts } = recover(keys, root, owner, [asset.tokenId], ev)
+  const { accounts } = recover(keys, root, owner, [asset.tokenId], ev, chainId())
   const a = accounts.find((x) => String(Number(x.index) + 1) === v.id!.replace(/^#/, ''))
   if (!a) throw new UsageError(`no account #${v.id} (see: moneysurfer v2 balance)`)
   if (!spendable(a)) throw new UsageError(`account #${v.id} has nothing left`)
@@ -818,6 +937,7 @@ async function ragequit(key: string | undefined, v: Flags, c: Common) {
 // ---------------------------------------------------------------------------
 async function status() {
   const net = await connect()
+  out(`chain        ${chainName(chainId())} (${chainId()})`)
   out(`pool         ${POOL_ADDR}`)
   out(`  keystore     ${await read(net, POOL_ADDR, POOL.keystore)}`)
   out(`  aspRegistry  ${await read(net, POOL_ADDR, POOL.aspRegistry)}`)
@@ -830,6 +950,7 @@ async function status() {
   out(`aspRegistry  ${ASP_REGISTRY}`)
   out(`  latestRoot   ${hex32(await read(net, ASP_REGISTRY, ASP.latestASPRoot))}`)
   out(`asp          ${ASP_PUBLIC_KEY} (X25519)`)
+  out(`relay        ${RELAY_ADDR}`)
 }
 
 async function trees() {
@@ -849,20 +970,25 @@ export const HELP: string = `moneysurfer v2 -- Privacy Pools V2 from the command
   v2 setup [circuit...]              fetch the circuits, check their pinned sha256
   v2 init                            make a new seed (the one secret behind every note)
        --import                      ... or take one on stdin
-       --from-wallet                 ... or derive v2.privacypools.com's from your wallet
+       --from-wallet                 ... or derive privacypools.com's from your wallet
   v2 register                        put this address in the Keystore -- required before spending
   v2 pools                           every asset the Entrypoint takes: minimum, fee, notes
   v2 balance                         your notes and what each holds
   v2 sync                            pull the pool, keystore and ASP events into the cache
   v2 deposit <asset> <amount>        deposit from your wallet (a token is approved first, exactly)
-  v2 withdraw <asset> <amount|all> <to>   spend privately: a transact with one unshielded output
+  v2 withdraw <asset> <amount|all> <to>   spend privately, through a relayer that pays the gas;
+                                     <to> gets <amount> less its fee
        --id N                        from account #N (default: the first that can)
+       --relayer URL                 use this relayer instead of 0xbow's
        --self | --safe SAFE          submit and pay gas yourself, or have a Safe submit it
-                                     <to> has to be the submitter: the pool pays msg.sender
+                                     <to> has to be the submitter then: the pool pays msg.sender
   v2 ragequit <asset> --id N         take a note back publicly, to the owning address
   v2 status | trees                  the deployment, and both trees rebuilt from logs
 
-  --max-fee-percent N                on deposit, how far over the wrapping quote you will go
+  --chain CHAIN                      ethereum (default) or bnb; each chain has its own notes.
+                                     bnb needs --rpc-url: no public BNB RPC serves old logs
+  --max-fee-percent N                on withdraw, refuse a relayer fee above N% (default 1);
+                                     on deposit, how far over the wrapping quote you will go
                                      (default 0.0001, one part per million)
 
 amounts are human units of what you spend. For a wrapped asset (usdc, usdt) a deposit spends
@@ -871,7 +997,8 @@ more than a dollar, so 10 USDC buys under 10 ppUSDC and falls below the minimum.
 10.02 usdc is the real floor; the error says so with the number of the day. A withdrawal
 spends the note, so its amount is in shares, and shares are what it pays out.
 
-Ethereum mainnet only, one deployment, no --chain.
+A relayer's fee is mostly the gas of the withdrawal, not a share of it, so the 1% default
+refuses the smallest ones; the error says what was asked.
 
 env: MONEYSURFER_MNEMONIC, MONEYSURFER_RPC, MONEYSURFER_ASP`
 
@@ -890,6 +1017,7 @@ export const COMMANDS = [
 ] as const
 
 export async function run(cmd: string, rest: string[], v: Flags, c: Common): Promise<void> {
+  if (v.chain !== undefined) setChain(parseChain(v.chain))
   const commands: Record<string, () => unknown> = {
     setup: () => setup(rest),
     init: () => init({ import: v.import, fromWallet: v['from-wallet'], sig: c.sig }),

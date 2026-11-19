@@ -62,13 +62,13 @@ ${section(v2.HELP)}
 ${SHARED}`
 
 /**
- * Flags a protocol has no use for. Refusing one is better than ignoring it:
- * a `--chain optimism` that quietly did nothing would read as a V2 deposit on
- * Optimism, which is not a thing.
+ * Flags a protocol has no use for. Refusing one is better than ignoring it.
+ * `--chain` is not among them: each protocol checks it against the chains it
+ * is deployed on, so `v2 --chain optimism` is refused there, by name.
  */
 const REJECTS: Record<'v1' | 'v2', { flag: keyof Flags; why: string }[]> = {
   v1: [],
-  v2: [{ flag: 'chain', why: 'V2 is one deployment on Ethereum mainnet' }],
+  v2: [],
 }
 
 try {

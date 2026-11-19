@@ -22,9 +22,8 @@ import { symbolKey, uniqueKeys } from '../shared/symbols.ts'
 import {
   ASP_REGISTRY,
   aspApi,
-  CANDIDATE_TOKENS,
-  CHAIN_ID,
-  DEPLOYED_BLOCK,
+  chainId,
+  deployment,
   ENTRYPOINT_ADDR,
   HOME,
   IPFS_GATEWAYS,
@@ -450,7 +449,7 @@ export type PoolEvents = {
 }
 
 const empty = (): PoolEvents => ({
-  block: DEPLOYED_BLOCK - 1,
+  block: deployment().deployedBlock - 1,
   deposits: [],
   ragequits: [],
   transacts: [],
@@ -460,7 +459,7 @@ const empty = (): PoolEvents => ({
   aspRoots: [],
 })
 
-const cacheFile = () => join(HOME, 'cache', `${CHAIN_ID}-${POOL_ADDR.toLowerCase()}.json`)
+const cacheFile = () => join(HOME, 'cache', `${chainId()}-${POOL_ADDR.toLowerCase()}.json`)
 
 const revive = (_k: string, v: unknown) => (typeof v === 'string' && /^\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v)
 const replace = (_k: string, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v)
@@ -478,7 +477,7 @@ function loadEvents(): PoolEvents {
 export async function sync(net: RpcClient, log?: (s: string) => void): Promise<PoolEvents> {
   const head = Number(await net.call('eth_blockNumber'))
   const ev = loadEvents()
-  const from = Math.max(DEPLOYED_BLOCK, ev.block - REORG_BLOCKS + 1)
+  const from = Math.max(deployment().deployedBlock, ev.block - REORG_BLOCKS + 1)
   const keep = <T extends At>(xs: T[]) => xs.filter((x) => x.block < from)
   ev.deposits = keep(ev.deposits)
   ev.ragequits = keep(ev.ragequits)
@@ -595,7 +594,7 @@ function matching(leaves: bigint[], root: bigint): LeanIMT | undefined {
   return sorted.root === root ? sorted : undefined
 }
 
-const aspCache = (root: bigint) => join(HOME, 'cache', `asp-${CHAIN_ID}-${root}.json`)
+const aspCache = (root: bigint) => join(HOME, 'cache', `asp-${chainId()}-${root}.json`)
 
 /**
  * The association set whose root the registry has published. The registry also
@@ -640,7 +639,7 @@ export async function aspSet(net: RpcClient, log?: (s: string) => void): Promise
     }
   }
   log?.(`no IPFS gateway served ${cid}; asking the ASP's API instead (it sees your IP, not your notes)`)
-  const url = `${aspApi()}/association-set/leaves?chainId=${CHAIN_ID}&entrypoint=${ENTRYPOINT_ADDR}`
+  const url = `${aspApi()}/association-set/leaves?chainId=${chainId()}&entrypoint=${ENTRYPOINT_ADDR}`
   const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`)
   const { leaves } = (await res.json()) as { leaves: string[] }
@@ -697,11 +696,9 @@ export type Asset = {
   maxRelayFee: bigint
 }
 
-const ETH_TOKEN = { symbol: 'ETH', decimals: 18 }
-
 /** A token's symbol and decimals; the native coin has neither on chain. */
 async function tokenMeta(net: RpcClient, token: string): Promise<{ symbol: string; decimals: number }> {
-  if (isNative(token)) return ETH_TOKEN
+  if (isNative(token)) return { symbol: deployment().native, decimals: 18 }
   const [symbol, decimals] = await Promise.all([read(net, token, ERC20.symbol), read(net, token, ERC20.decimals)])
   return { symbol, decimals: Number(decimals) }
 }
@@ -716,7 +713,7 @@ async function tokenMeta(net: RpcClient, token: string): Promise<{ symbol: strin
  */
 export async function assets(net: RpcClient): Promise<Asset[]> {
   const found = await Promise.all(
-    CANDIDATE_TOKENS.map(async (tokenId) => {
+    deployment().tokens.map(async (tokenId) => {
       const [meta, cfg] = await Promise.all([
         tokenMeta(net, tokenId),
         read(net, ENTRYPOINT_ADDR, ENTRYPOINT.assets, tokenId),

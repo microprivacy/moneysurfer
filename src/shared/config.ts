@@ -32,11 +32,17 @@ export const ASSETS_ROOT = process.env.MONEYSURFER_ASSETS ?? join(HOME_ROOT, 'as
  * Supported chains, each with the public RPC used unless --rpc-url is given:
  * ones that serve logs over wide block ranges without a key. `safe` is the
  * chain's EIP-3770 short name, which the Safe Transaction Service and app
- * address it by. V2 is mainnet-only so far; the table is V1's.
+ * address it by. V1 is on the first three; BNB Chain is V2's alone.
+ *
+ * BNB Chain has no `rpc`: none of its keyless RPCs serves eth_getLogs over
+ * the blocks a sync reads. bsc-dataseed answers calls but not logs at all,
+ * publicnode wants a token for anything old, the rest cap a range at 50-250
+ * blocks, and NodeReal's chainlist key shares one quota with everyone using it.
  */
-export const CHAINS: Record<number, { name: string; rpc: string; safe: string }> = {
+export const CHAINS: Record<number, { name: string; rpc?: string; safe: string }> = {
   1: { name: 'Ethereum', rpc: 'https://mainnet.gateway.tenderly.co', safe: 'eth' },
   10: { name: 'Optimism', rpc: 'https://optimism.gateway.tenderly.co', safe: 'oeth' },
+  56: { name: 'BNB', safe: 'bnb' },
   42161: { name: 'Arbitrum', rpc: 'https://arbitrum.gateway.tenderly.co', safe: 'arb1' },
 }
 
@@ -55,7 +61,7 @@ export const SAFE_TX_SERVICE = process.env.MONEYSURFER_SAFE_TX_SERVICE ?? 'https
 /** Frame's local JSON-RPC: the signer when neither a key nor --rpc-url is given. */
 export const FRAME_RPC = 'http://127.0.0.1:1248'
 
-/** A --chain value: a name (ethereum, optimism, arbitrum) or a chain id. */
+/** A --chain value: a name (ethereum, optimism, bnb, arbitrum) or a chain id. */
 export function parseChain(v: string): number {
   if (/^\d+$/.test(v)) return Number(v)
   const hit = Object.entries(CHAINS).find(([, c]) => c.name.toLowerCase() === v.toLowerCase())
