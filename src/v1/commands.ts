@@ -128,7 +128,7 @@ async function init(o: { import?: boolean; fromWallet?: boolean; chain?: number;
     return saveMnemonic(words)
   }
   if (o.fromWallet) {
-    // privacypools.com's "sign in with wallet": the seed is derived from a
+    // v1.privacypools.com's "sign in with wallet": the seed is derived from a
     // signature, which must therefore be deterministic -- so ask for two.
     const chainId = o.chain ?? 1
     const signer = await makeSigner(await connect(chainId), chainId, o.sig)
@@ -137,7 +137,7 @@ async function init(o: { import?: boolean; fromWallet?: boolean; chain?: number;
     const [a, b] = [await signer.signTyped(typed), await signer.signTyped(typed)]
     if (a !== b) throw new Error('the wallet signed the same message differently twice; it cannot derive a stable seed')
     saveMnemonic(mnemonicFromSignature(a, signer.address))
-    return log(`this is the account privacypools.com derives for ${signer.address}`)
+    return log(`this is the account v1.privacypools.com derives for ${signer.address}`)
   }
   const words = generateMnemonic(wordlist, 256)
   saveMnemonic(words)
@@ -676,7 +676,7 @@ export const HELP: string = `moneysurfer v1 -- Privacy Pools V1 from the command
   setup                              fetch the circuits, check their pinned sha256
   init                               make a new mnemonic (the one secret behind every note)
        --import                      ... or take one on stdin
-       --from-wallet                 ... or derive privacypools.com's from your wallet's signature
+       --from-wallet                 ... or derive v1.privacypools.com's from your wallet's signature
   pools                              every pool the Entrypoints registered: minimum deposit, fee, size
   balance                            your accounts and what each holds
   sync                               pull every pool's events into the cache

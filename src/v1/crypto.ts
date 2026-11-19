@@ -130,7 +130,7 @@ export class LeanIMT {
 }
 
 // ---------------------------------------------------------------------------
-// Account seed from a wallet signature, as privacypools.com derives it
+// Account seed from a wallet signature, as v1.privacypools.com derives it
 // (privacy-pools-website src/utils/walletSeed.ts, "v2")
 // ---------------------------------------------------------------------------
 const SEED_CONTEXT = 'privacy-pools/wallet-seed:v2'
