@@ -48,8 +48,6 @@ export const KEYSTORE_ADDR = '0x6E463391c79b7e1A88eF26E0B023f9A6C9938a71'
 export const ASP_REGISTRY = '0x259C0BEa1d783c202509BD3b2688d23b8AEf58B0'
 export const ENTRYPOINT_ADDR = '0xca1e072236D231130059eeA6Bfceb7F4e9a1F0C3'
 export const ACCESS_ROUTER = '0x40a6bC296D87f71Ab31Ca3Bfb50513441fBD5160'
-export const DEPOSIT_VERIFIER = '0x49Ab3f48Ff9fa603EE81E5f28eB4214798E29862'
-export const RAGEQUIT_VERIFIER = '0x687059Fc9C2488f333e06aa72CBea7E4b1D05B57'
 /**
  * The PrivacyPoolRelay a relayed withdrawal names as its processor. The pool
  * pays the processor all of `amountOut` and this contract splits it by the
@@ -213,9 +211,10 @@ export function rpcUrl(): string {
 }
 
 /**
- * Gateways for the circuit artifacts. Any of them may lie: an artifact counts
- * only once its sha256 matches the manifest. ipfs.io and dweb.link were
- * rate-limiting every request at the time of writing; pinata was not.
+ * IPFS gateways, for the copy of the ASP's tree the registry points at. Any of
+ * them may lie: the tree counts only once it hashes to the root on chain.
+ * ipfs.io and dweb.link were rate-limiting every request at the time of
+ * writing; pinata was not.
  */
 export const IPFS_GATEWAYS = [
   'https://gateway.pinata.cloud',
@@ -224,20 +223,23 @@ export const IPFS_GATEWAYS = [
   'https://w3s.link',
 ]
 
-export type Artifact = {
-  wasm: string
-  wasmSha256: string
-  provingKey: string
-  provingKeySha256: string
-  verificationKey: string
-  /** not in the app's manifest: each file was checked against its CID, then pinned here */
-  verificationKeySha256: string
-}
+/**
+ * Where the app fetches the circuits from: `<circuit>/<circuit>_js/<circuit>.wasm`,
+ * `<circuit>/groth16_pkey.zkey` and `<circuit>/groth16_vkey.json` under one
+ * versioned path. The host is only a source -- a file counts once it hashes to
+ * the manifest -- and the version in the path is the app's `ARTIFACTS_VERSION`.
+ *
+ * The SDK's IPFS manifest still names the first ceremony's keys, which the
+ * verifiers no longer accept: they were redeployed from this set, wasm
+ * unchanged, after the launch.
+ */
+export const ARTIFACTS_URL = 'https://artifacts.privacypools.com/artifacts/0b62f6b7e5eb'
+
+export type Artifact = { wasmSha256: string; provingKeySha256: string; verificationKeySha256: string }
 
 /**
- * The 27 circuits' CIDs and sha256, as the web app's `IpfsCircuitArtifacts`
- * hardcodes them. `deposit`, `ragequit` and `transact_1x1` were fetched and
- * checked; see FINDINGS.md.
+ * The 27 circuits' sha256, from the set at ARTIFACTS_URL. Each verification
+ * key was checked against the deployed verifiers' bytecode; see FINDINGS.md.
  */
 export const CIRCUITS: Record<string, Artifact> = CIRCUIT_ARTIFACTS
 

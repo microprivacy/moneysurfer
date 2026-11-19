@@ -21,6 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { keccak_256 } from '@noble/hashes/sha3.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { entropyToMnemonic, generateMnemonic, mnemonicToEntropy, validateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
@@ -31,7 +32,7 @@ import { assertChain, read, rpc } from '../shared/rpc.ts'
 import { batch, nextNonce, prepareSafeTx, proposeSafeTx, queuedWith, type SafeCall, safeQueue } from '../shared/safe.ts'
 import { makeSigner, type Signer } from '../shared/signer.ts'
 import { type Account, recover, spendable } from './account.ts'
-import { fetchArtifact, have, pinned, verificationKey } from './artifacts.ts'
+import { builtFrom, current, fetchArtifact, have, pinned, verificationKey } from './artifacts.ts'
 import {
   ASP,
   type Asset,
@@ -55,7 +56,6 @@ import {
   CIRCUITS,
   chainId,
   chainName,
-  DEPOSIT_VERIFIER,
   ENTRYPOINT_ADDR,
   HOME,
   isNative,
@@ -201,11 +201,13 @@ async function setup(which: string[]) {
   for (const c of circuits) {
     if (!CIRCUITS[c]) throw new UsageError(`unknown circuit '${c}'`)
     for (const kind of ['wasm', 'zkey', 'vkey'] as const) {
-      if (have(c, kind)) {
+      if (current(c, kind)) {
         log(`have ${c}.${kind}`)
         continue
       }
-      log(`downloading ${c}.${kind} ...`)
+      // A file that is there but not pinned is from an older set: the first
+      // ceremony's keys, which the verifiers have since stopped accepting.
+      log(`${have(c, kind) ? 'replacing an out-of-date' : 'downloading'} ${c}.${kind} ...`)
       const bytes = await fetchArtifact(c, kind)
       log(`  ${bytes.length} bytes, sha256 ${pinned(c, kind)} matches`)
     }
@@ -941,7 +943,25 @@ async function status() {
   out(`pool         ${POOL_ADDR}`)
   out(`  keystore     ${await read(net, POOL_ADDR, POOL.keystore)}`)
   out(`  aspRegistry  ${await read(net, POOL_ADDR, POOL.aspRegistry)}`)
-  out(`  depositVk    ${await read(net, POOL_ADDR, POOL.depositVerifier)} (expected ${DEPOSIT_VERIFIER})`)
+  // The verifiers are swapped out from under any address pinned here -- all of
+  // them were, after the launch -- so what is checked is the key each one
+  // carries: a proof made here passes only a verifier built from the pinned one.
+  // the key of `transact_1x1` in `verifiers`: keccak256(abi.encode(1, 1))
+  const transactKey = keccak_256(hexToBytes(`${'0'.repeat(63)}1`.repeat(2)))
+  const verifiers: [string, string, Promise<string>][] = [
+    ['depositVk', 'deposit', read(net, POOL_ADDR, POOL.depositVerifier)],
+    ['ragequitVk', 'ragequit', read(net, POOL_ADDR, POOL.ragequitVerifier)],
+    ['transactVk', 'transact_1x1', read(net, POOL_ADDR, POOL.verifiers, transactKey).then((v) => v.verifier)],
+  ]
+  for (const [label, circuit, at] of verifiers) {
+    const address = await at
+    const how = !current(circuit, 'vkey')
+      ? `run \`moneysurfer v2 setup ${circuit}\` to check it`
+      : builtFrom(String(await net.call('eth_getCode', address, 'latest')), circuit)
+        ? `built from the pinned ${circuit} key`
+        : `NOT built from the pinned ${circuit} key -- proofs made here will be rejected`
+    out(`  ${label.padEnd(12)} ${address}  ${how}`)
+  }
   out(`  paused       ${await read(net, POOL_ADDR, POOL.paused)}`)
   out(`entrypoint   ${ENTRYPOINT_ADDR}`)
   out(`  poolVault    ${await read(net, ENTRYPOINT_ADDR, ENTRYPOINT.poolVault)}`)

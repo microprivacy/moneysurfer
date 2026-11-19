@@ -4,8 +4,8 @@
 // If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * V2's 27 circuits. Their artifacts are content-addressed on IPFS and pinned
- * by sha256 in circuit-artifacts.json, so artifacts.ts re-checks every file it
+ * V2's 27 circuits. Their artifacts are pinned by sha256 in
+ * circuit-artifacts.json, so artifacts.ts re-checks every file it
  * hands over; the proving itself is shared/prover.ts, the same engine V1 uses.
  *
  * Unlike V1, this ceremony publishes a verification key apart from the zkey.
