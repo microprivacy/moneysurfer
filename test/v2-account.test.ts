@@ -102,11 +102,11 @@ test("the root secret is HKDF of the signature's r, and nothing else of it", () 
 })
 
 test('note secrets come from the seed, so nothing else needs backing up', () => {
-  const a = depositSecrets(SEED, TOKEN, 0n)
+  const a = depositSecrets(SEED, TOKEN, 0n, 1)
   assert.notEqual(a.noteSecret, a.depositSecret)
   // Indices, assets and lineages are all separated.
-  assert.notEqual(a.noteSecret, depositSecrets(SEED, TOKEN, 1n).noteSecret)
-  assert.notEqual(a.noteSecret, depositSecrets(SEED, '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', 0n).noteSecret)
+  assert.notEqual(a.noteSecret, depositSecrets(SEED, TOKEN, 1n, 1).noteSecret)
+  assert.notEqual(a.noteSecret, depositSecrets(SEED, '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', 0n, 1).noteSecret)
   assert.notEqual(changeSecret(SEED, 7n, 0n), changeSecret(SEED, 7n, 1n))
   assert.notEqual(changeSecret(SEED, 7n, 0n), changeSecret(SEED, 8n, 0n))
   for (const s of [a.noteSecret, a.depositSecret, changeSecret(SEED, 7n, 0n)]) {
@@ -114,12 +114,29 @@ test('note secrets come from the seed, so nothing else needs backing up', () => 
   }
 })
 
+test("one seed's notes on two chains share nothing, and mainnet's are the ones it always had", () => {
+  const NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+  // Pinned from the derivation as it was before BNB Chain: the notes made on
+  // mainnet then must still be found.
+  assert.deepEqual(depositSecrets(SEED, NATIVE, 0n, 1), {
+    noteSecret: 18873331533215859456027395922392500632344332420675727510815296307944340931855n,
+    depositSecret: 14635483703435157516942200751789107953886777898613790331396092663865682613391n,
+  })
+  // Every chain's coin is NATIVE, so only the chain keeps the first BNB
+  // deposit from being the first ETH deposit -- the same commitment, spent to
+  // the same nullifier, in public.
+  assert.deepEqual(depositSecrets(SEED, NATIVE, 0n, 56), {
+    noteSecret: 5028792551828233366283565226519806457815959203824180644005240626582086109881n,
+    depositSecret: 2320660086790650554287108910134405360098991056816927278503141551789201098979n,
+  })
+})
+
 // ---------------------------------------------------------------------------
 const at = { block: 1, tx: '0x' }
 
 /** The deposit event this seed's index-th deposit of `value` would produce. */
 function depositEvent(index: bigint, value: bigint): Deposit {
-  const { noteSecret, depositSecret } = depositSecrets(SEED, TOKEN, index)
+  const { noteSecret, depositSecret } = depositSecrets(SEED, TOKEN, index, 1)
   const pre = precommitment(noteAddressHash(OWNER, noteSecret), TOKEN, value)
   return { ...at, tokenId: TOKEN, value, commitment: commitment(pre, labelOf(pre, depositSecret)) }
 }
@@ -139,7 +156,7 @@ const events = (o: Partial<PoolEvents>): PoolEvents => ({
 test('a deposit this seed made is found again from the log alone', () => {
   const keys = deriveKeys(SEED)
   const ev = events({ deposits: [depositEvent(0n, 100n), depositEvent(2n, 300n)] })
-  const { accounts, nextIndex } = recover(keys, SEED, OWNER, [TOKEN], ev)
+  const { accounts, nextIndex } = recover(keys, SEED, OWNER, [TOKEN], ev, 1)
   assert.deepEqual(
     accounts.map((a) => [a.index, a.note.value]),
     [
@@ -155,19 +172,21 @@ test('a deposit this seed made is found again from the log alone', () => {
 test("someone else's deposit is not mistaken for ours", () => {
   const keys = deriveKeys(SEED)
   const theirs: Deposit = { ...at, tokenId: TOKEN, value: 100n, commitment: 12345n }
-  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [theirs] }))
+  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [theirs] }), 1)
   assert.equal(accounts.length, 0)
   // ... and neither is our own deposit read at the wrong owner address
   const mine = events({ deposits: [depositEvent(0n, 100n)] })
-  assert.equal(recover(keys, SEED, '0x2222222222222222222222222222222222222222', [TOKEN], mine).accounts.length, 0)
+  assert.equal(recover(keys, SEED, '0x2222222222222222222222222222222222222222', [TOKEN], mine, 1).accounts.length, 0)
+  // ... nor read as another chain's
+  assert.equal(recover(keys, SEED, OWNER, [TOKEN], mine, 56).accounts.length, 0)
 })
 
 test('a spend is followed to the change note it left', () => {
   const keys = deriveKeys(SEED)
   const d = depositEvent(0n, 1000n)
-  const { noteSecret } = depositSecrets(SEED, TOKEN, 0n)
+  const { noteSecret } = depositSecrets(SEED, TOKEN, 0n, 1)
   const pre = precommitment(noteAddressHash(OWNER, noteSecret), TOKEN, 1000n)
-  const label = labelOf(pre, depositSecrets(SEED, TOKEN, 0n).depositSecret)
+  const label = labelOf(pre, depositSecrets(SEED, TOKEN, 0n, 1).depositSecret)
   // withdraw 400, leaving 600 as the first change note under the same label
   const change = changeSecret(SEED, label, 0n)
   const changeCommitment = commitment(precommitment(noteAddressHash(OWNER, change), TOKEN, 600n), label)
@@ -179,7 +198,7 @@ test('a spend is followed to the change note it left', () => {
     commitments: [changeCommitment],
     processooor: OWNER,
   }
-  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [d], transacts: [t] }))
+  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [d], transacts: [t] }), 1)
   assert.equal(accounts.length, 1)
   assert.equal(accounts[0]!.note.value, 600n)
   assert.equal(accounts[0]!.note.child, 0)
@@ -200,7 +219,7 @@ test('a spend whose change this seed cannot derive is reported, not skipped', ()
     commitments: [999n], // not ours: another client, or several notes at once
     processooor: OWNER,
   }
-  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [d], transacts: [t] }))
+  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], events({ deposits: [d], transacts: [t] }), 1)
   assert.equal(accounts.length, 1)
   assert.match(accounts[0]!.lost!, /change this seed does not derive/)
   assert.equal(spendable(accounts[0]!), false)
@@ -209,7 +228,7 @@ test('a spend whose change this seed cannot derive is reported, not skipped', ()
 test('a ragequit account is not spendable', () => {
   const keys = deriveKeys(SEED)
   const d = depositEvent(0n, 1000n)
-  const { noteSecret, depositSecret } = depositSecrets(SEED, TOKEN, 0n)
+  const { noteSecret, depositSecret } = depositSecrets(SEED, TOKEN, 0n, 1)
   const label = labelOf(precommitment(noteAddressHash(OWNER, noteSecret), TOKEN, 1000n), depositSecret)
   const ev = events({
     deposits: [d],
@@ -217,7 +236,7 @@ test('a ragequit account is not spendable', () => {
       { ...at, ragequitter: OWNER, tokenId: TOKEN, value: 1000n, commitment: d.commitment, nullifier: 1n, label },
     ],
   })
-  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], ev)
+  const { accounts } = recover(keys, SEED, OWNER, [TOKEN], ev, 1)
   assert.equal(accounts.length, 1)
   assert.ok(accounts[0]!.ragequit)
   assert.equal(spendable(accounts[0]!), false)

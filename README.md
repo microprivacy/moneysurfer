@@ -8,10 +8,10 @@ moneysurfer [v1|v2] <command> ...
 
 ## Features
 
-- Full V1 and V2 support: V1 on Ethereum, Optimism and Arbitrum; V2 on mainnet
+- Full V1 and V2 support: V1 on Ethereum, Optimism and Arbitrum; V2 on Ethereum and BNB Chain
 - One seed per protocol
 - Nothing is sent to the ASP; its set is read from the chain
-- Withdraw via a relayer (V1), yourself, or a Safe; ragequit if unapproved
+- Withdraw via a relayer, yourself, or a Safe; ragequit if unapproved
 - Local prover in pure JS, everything simulated before sending
 - Sign with Frame, a private key or a keystore
 - Minimal and security audited dependencies, bundled in: an install adds one package
@@ -46,9 +46,9 @@ A deposit can be withdrawn once the ASP approves it (up to 7 days); until then
 
 ### V2
 
-Relayed withdrawals are not supported for v2 yet, and without a relayer a spend pays whoever
-submits it: the pool hands the amount to `msg.sender` and requires that to be the processooor
-the proof names. So `<to>` is your own address, and anywhere else is a second transaction.
+A withdrawal goes through 0xbow's relayer, which pays the gas and takes its fee out of
+`<amount>`. With `--self` or `--safe` you submit it instead, and then `<to>` has to be the
+submitter: the pool pays `msg.sender`, and only a relayer's contract splits the payout.
 
 ```sh
 moneysurfer v2 setup
@@ -56,8 +56,11 @@ moneysurfer v2 init                # --from-wallet derives the seed the app woul
 moneysurfer v2 register            # a Keystore leaf; required before spending
 moneysurfer v2 pools
 moneysurfer v2 deposit usdc 10.02
-moneysurfer v2 withdraw ppusdc 5 0xYourOwnAddress --self
+moneysurfer v2 withdraw ppusdc 5 0xRecipient
 ```
+
+`--chain bnb` uses BNB Chain, with a seed's notes kept apart from its mainnet ones. It needs
+`--rpc-url`: no public BNB Chain RPC serves the logs a sync reads.
 
 Run `moneysurfer help` for all commands and options.
 

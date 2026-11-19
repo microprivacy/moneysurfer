@@ -27,11 +27,12 @@ export const ASSETS = ASSETS_ROOT
 export const HOME = HOME_ROOT
 
 /**
- * The circuits' wasm and the trusted-setup keys, as privacypools.com serves
+ * The circuits' wasm and the trusted-setup keys, as v1.privacypools.com serves
  * them, pinned by the sha256 0xbow's SDK pins
  * (privacy-pools-core packages/sdk/src/circuits/artifactHashes.ts).
+ * privacypools.com itself is the V2 app now, and answers 200 with its HTML.
  */
-export const ARTIFACT_URL = 'https://privacypools.com/artifacts'
+export const ARTIFACT_URL = 'https://v1.privacypools.com/artifacts'
 export const ARTIFACTS: Record<string, string> = {
   'withdraw.wasm': '36cda22791def3d520a55c0fc808369cd5849532a75fab65686e666ed3d55c10',
   'withdraw.zkey': '2a893b42174c813566e5c40c715a8b90cd49fc4ecf384e3a6024158c3d6de677',

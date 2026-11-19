@@ -295,11 +295,23 @@ function noteScalar(rootSecret: Uint8Array, what: string, a: bigint, b: bigint):
   return reduce(hkdf(sha256, appSecretFrom(rootSecret), utf8ToBytes(PP_V2), info, 48))
 }
 
-/** The `index`-th deposit this seed makes in `tokenId`. */
-export const depositSecrets = (rootSecret: Uint8Array, tokenId: string, index: bigint) => ({
-  noteSecret: noteScalar(rootSecret, 'note', addressToField(tokenId), index),
-  depositSecret: noteScalar(rootSecret, 'deposit', addressToField(tokenId), index),
-})
+/**
+ * The `index`-th deposit this seed makes in `tokenId` on `chainId`.
+ *
+ * The chain is in the derivation because a tokenId is not unique to one:
+ * every chain's coin is NATIVE. Without it, a seed's first ETH deposit and
+ * its first BNB deposit of the same value would be the same commitment, spend
+ * to the same nullifier, and so link the two withdrawals in public. Mainnet
+ * keeps the info string it had before there was a second chain, so the notes
+ * made then are still found.
+ */
+export const depositSecrets = (rootSecret: Uint8Array, tokenId: string, index: bigint, chainId: number) => {
+  const on = chainId === 1 ? '' : `@${chainId}`
+  return {
+    noteSecret: noteScalar(rootSecret, `note${on}`, addressToField(tokenId), index),
+    depositSecret: noteScalar(rootSecret, `deposit${on}`, addressToField(tokenId), index),
+  }
+}
 
 /** The note a spend leaves behind: the `index`-th change note under a label. */
 export const changeSecret = (rootSecret: Uint8Array, label: bigint, index: bigint) =>
@@ -343,24 +355,21 @@ function encodeNoteData(key: string, ciphertext: Uint8Array): Uint8Array {
  * a relayer hand the recipient some of the chain's coin to move with; this
  * client always leaves it 0.
  */
+const PAYOUT_ROUTING = {
+  name: 'routing',
+  type: 'tuple',
+  components: [
+    { name: 'recipient', type: 'address' },
+    { name: 'feeRecipient', type: 'address' },
+    { name: 'feeAmount', type: 'uint256' },
+    { name: 'nativeGas', type: 'uint256' },
+  ],
+} as const
+
 const ROUTING = createContract([
-  {
-    type: 'function',
-    name: 'payoutRouting',
-    inputs: [
-      {
-        name: 'routing',
-        type: 'tuple',
-        components: [
-          { name: 'recipient', type: 'address' },
-          { name: 'feeRecipient', type: 'address' },
-          { name: 'feeAmount', type: 'uint256' },
-          { name: 'nativeGas', type: 'uint256' },
-        ],
-      },
-    ],
-    outputs: [],
-  },
+  { type: 'function', name: 'payoutRouting', inputs: [PAYOUT_ROUTING], outputs: [] },
+  // the same tuple as an output, so it decodes from bare `data` with no selector in front
+  { type: 'function', name: 'readRouting', inputs: [], outputs: [PAYOUT_ROUTING] },
   {
     type: 'function',
     name: 'transactContext',
@@ -390,6 +399,9 @@ export type Routing = { recipient: string; feeRecipient: string; feeAmount: bigi
 
 /** abi.encode(PayoutRouting{recipient, feeRecipient, feeAmount, nativeGas}). */
 export const payoutRouting = (r: Routing): Uint8Array => ROUTING.payoutRouting.encodeInput(r).slice(4)
+
+/** The PayoutRouting a relayer signed, read back so it can be checked before it is proven. */
+export const decodePayoutRouting = (data: Uint8Array): Routing => ROUTING.readRouting.decodeOutput(data)
 
 /**
  * `keccak256(abi.encode(transactParams, noteData[]))`, as the pool recomputes

@@ -69,7 +69,7 @@ export const noteCommitment = (owner: string, n: Omit<Note, 'commitment' | 'chil
   commitmentOf(precommitment(noteAddressHash(owner, n.noteSecret), n.tokenId, n.value), n.label)
 
 /**
- * Every account this seed owns at `owner`, across the tokenIds given.
+ * Every account this seed owns at `owner` on `chainId`, across the tokenIds given.
  *
  * A deposit is matched the way V1 matches a precommitment: the event supplies
  * `value` and `tokenId`, the seed supplies the two secrets, and the commitment
@@ -83,6 +83,7 @@ export function recover(
   owner: string,
   tokenIds: string[],
   ev: PoolEvents,
+  chainId: number,
 ): { accounts: Account[]; nextIndex: Map<string, bigint> } {
   const ragequits = new Map(ev.ragequits.map((r) => [r.label, r]))
   const accounts: Account[] = []
@@ -92,7 +93,7 @@ export function recover(
     const mine = ev.deposits.filter((d) => d.tokenId.toLowerCase() === tokenId.toLowerCase())
     let unused: bigint | undefined
     for (let i = 0n, misses = 0; misses < MISSES; i++) {
-      const { noteSecret, depositSecret } = depositSecrets(rootSecret, tokenId, i)
+      const { noteSecret, depositSecret } = depositSecrets(rootSecret, tokenId, i, chainId)
       const ah = noteAddressHash(owner, noteSecret)
       const d = mine.find((x) => {
         const pre = precommitment(ah, tokenId, x.value)
@@ -105,7 +106,7 @@ export function recover(
       }
       misses = 0
       const label = labelOf(precommitment(ah, tokenId, d.value), depositSecret)
-      accounts.push(follow(keys, rootSecret, owner, tokenId, i, label, d, ev, ragequits.get(label)))
+      accounts.push(follow(keys, rootSecret, owner, tokenId, i, label, d, ev, ragequits.get(label), chainId))
     }
     nextIndex.set(tokenId.toLowerCase(), unused ?? 0n)
   }
@@ -123,9 +124,10 @@ function follow(
   deposit: Deposit,
   ev: PoolEvents,
   ragequit: Ragequit | undefined,
+  chainId: number,
 ): Account {
   let note: Note = {
-    noteSecret: depositSecrets(rootSecret, tokenId, index).noteSecret,
+    noteSecret: depositSecrets(rootSecret, tokenId, index, chainId).noteSecret,
     tokenId,
     value: deposit.value,
     label,
