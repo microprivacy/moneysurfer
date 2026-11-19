@@ -347,7 +347,7 @@ async function register(c: Common) {
         "That is another seed's account -- registering again would orphan its notes",
     )
   }
-  log('this is public: it records that this address uses Privacy Pools, and nothing else')
+  log('this is public: anyone can see this address registered with Privacy Pools, but not its deposits or withdrawals')
   if (c.safe) return proposeCalls(net, c, calls, 'the registration')
   const signer = await signerFor(net, c, owner)
   for (const call of calls) {
